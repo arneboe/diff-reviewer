@@ -12,6 +12,13 @@ export interface RepoInfo {
   relativePath: string;
 }
 
+/** Per-repository facts the extension needs besides the file list. */
+export interface RepoState {
+  headSha: string;
+  hasStaged: boolean;
+  gitDir: string;
+}
+
 /** Minimal interface StateManager needs to reach a repository's git adapter. */
 export interface GitResolver {
   getAdapter(repoRoot: string): GitAdapter;
@@ -78,8 +85,8 @@ export class RepoManager implements GitResolver {
   }
 
   /**
-   * Diff of every repository, in repo order. A repository whose diff fails
-   * (e.g. no commits yet) is skipped so the others still show up.
+   * Unstaged diff of every repository, in repo order. A repository whose diff
+   * fails is skipped so the others still show up.
    */
   async getDiff(): Promise<DiffFile[]> {
     const results = await Promise.allSettled(
@@ -94,6 +101,27 @@ export class RepoManager implements GitResolver {
       }
     });
     return files;
+  }
+
+  /** HEAD, staged-ness and git dir of every discovered repository. */
+  async getRepoStates(): Promise<Map<string, RepoState>> {
+    const states = new Map<string, RepoState>();
+    await Promise.all(
+      this.repos.map(async (r) => {
+        const adapter = this.getAdapter(r.root);
+        try {
+          const [headSha, hasStaged, gitDir] = await Promise.all([
+            adapter.headSha(),
+            adapter.hasStagedChanges(),
+            adapter.gitDir(),
+          ]);
+          states.set(r.root, { headSha, hasStaged, gitDir });
+        } catch (err) {
+          console.error(`Diff Reviewer: failed to read state of ${r.root}:`, err);
+        }
+      }),
+    );
+    return states;
   }
 
   private relativeToWorkspace(root: string): string {

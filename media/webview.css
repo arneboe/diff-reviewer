@@ -356,63 +356,6 @@ body {
   opacity: 0.85;
 }
 
-/* ---- Approved hunk: hide removed lines, remove border ---- */
-.inline-hunk.approved .diff-line.remove {
-  display: none;
-}
-
-.inline-hunk.approved .hunk-inline-actions {
-  display: none;
-}
-
-.inline-hunk.approved {
-  border: none;
-  margin: 0;
-  border-radius: 0;
-}
-
-/* ---- Rejected hunk: fade out ---- */
-.inline-hunk.rejected {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-.inline-hunk.rejected .hunk-inline-actions {
-  display: none;
-}
-
-.inline-hunk.rejected {
-  border-color: var(--vscode-testing-iconFailed, #f48771);
-}
-
-/* ---- Status badge ---- */
-.hunk-status-badge {
-  padding: 2px 12px;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  display: block;
-  text-align: right;
-  font-family: var(--vscode-font-family, sans-serif);
-}
-
-.hunk-status-badge.approved {
-  color: var(--vscode-testing-iconPassed, #89d185);
-}
-
-.hunk-status-badge.rejected {
-  color: var(--vscode-testing-iconFailed, #f48771);
-}
-
-.hunk-status-badge.undoable {
-  cursor: pointer;
-}
-
-.hunk-status-badge.undoable.undo-hover {
-  color: #aaaaaa;
-}
-
 /* ---- Scroll map ---- */
 .scroll-map {
   position: fixed;
@@ -449,10 +392,6 @@ body {
 
 .scroll-map-marker.mixed {
   background: #d19a66;
-}
-
-.scroll-map-marker.approved {
-  opacity: 0.35;
 }
 
 /* ---- Notices ---- */

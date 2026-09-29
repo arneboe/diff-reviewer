@@ -1,8 +1,12 @@
 import { DiffFile, DiffHunk, DiffLine } from '../types';
 
+const NO_NEWLINE = '\\ No newline at end of file';
+
 /**
  * Parse unified diff output from `git diff` into structured DiffFile objects.
- * Custom parser to preserve rawLines per hunk (needed for git apply -R).
+ * Custom parser to preserve rawLines per hunk (needed for git apply).
+ * Files with a header but no hunks (mode-only changes, empty new files,
+ * binary files) are kept so they can be handled at file level.
  */
 export function parseDiff(diffText: string): DiffFile[] {
   const files: DiffFile[] = [];
@@ -16,51 +20,61 @@ export function parseDiff(diffText: string): DiffFile[] {
       continue;
     }
 
+    const paths = pathsFromDiffGitLine(lines[i]);
     const file: DiffFile = {
       // The parser has no repository context; GitAdapter stamps the real root.
       repoRoot: '',
-      oldPath: '',
-      newPath: '',
+      oldPath: paths?.oldPath ?? '',
+      newPath: paths?.newPath ?? '',
       hunks: [],
       isBinary: false,
       diffHeader: [],
+      kind: 'modified',
+      isUntracked: false,
+      worktreeMissing: false,
     };
+    let oldMode: string | undefined;
+    let newMode: string | undefined;
 
-    // Skip diff --git line
     i++;
 
-    // Skip optional extended headers (old mode, new mode, index, similarity, rename, etc.)
+    // Extended headers up to the ---/+++ pair, the hunks, or the next file
     while (
       i < lines.length &&
       !lines[i].startsWith('diff --git ') &&
-      !lines[i].startsWith('---') &&
-      !lines[i].startsWith('@@') &&
-      !lines[i].startsWith('Binary')
+      !lines[i].startsWith('--- ') &&
+      !lines[i].startsWith('@@')
     ) {
+      const line = lines[i];
+      if (line.startsWith('new file mode ')) {
+        file.kind = 'added';
+      } else if (line.startsWith('deleted file mode ')) {
+        file.kind = 'deleted';
+      } else if (line.startsWith('old mode ')) {
+        oldMode = line.slice('old mode '.length).trim();
+      } else if (line.startsWith('new mode ')) {
+        newMode = line.slice('new mode '.length).trim();
+      } else if (line.startsWith('Binary files ') || line === 'GIT binary patch') {
+        file.isBinary = true;
+      }
       i++;
-    }
-
-    // Check for binary file
-    if (i < lines.length && lines[i].startsWith('Binary')) {
-      file.isBinary = true;
-      file.oldPath = extractPath(lines[i - 1] || '', 'a/');
-      file.newPath = extractPath(lines[i - 1] || '', 'b/');
-      files.push(file);
-      i++;
-      continue;
     }
 
     // Parse --- and +++ lines
-    if (i < lines.length && lines[i].startsWith('---')) {
+    if (i < lines.length && lines[i].startsWith('--- ')) {
       const oldLine = lines[i];
       file.diffHeader.push(oldLine);
-      file.oldPath = oldLine.startsWith('--- a/') ? oldLine.slice(6) : oldLine.slice(4);
+      if (!paths) {
+        file.oldPath = pathFromMarkerLine(oldLine, '--- ');
+      }
       i++;
     }
-    if (i < lines.length && lines[i].startsWith('+++')) {
+    if (i < lines.length && lines[i].startsWith('+++ ')) {
       const newLine = lines[i];
       file.diffHeader.push(newLine);
-      file.newPath = newLine.startsWith('+++ b/') ? newLine.slice(6) : newLine.slice(4);
+      if (!paths) {
+        file.newPath = pathFromMarkerLine(newLine, '+++ ');
+      }
       i++;
     }
 
@@ -75,10 +89,52 @@ export function parseDiff(diffText: string): DiffFile[] {
       }
     }
 
+    if (oldMode && newMode && oldMode !== newMode) {
+      file.modeChange = { from: oldMode, to: newMode };
+    }
+    file.worktreeMissing = file.kind === 'deleted';
     files.push(file);
   }
 
   return files;
+}
+
+/**
+ * Extract both paths from "diff --git a/<p> b/<p>". Paths may contain spaces;
+ * since renames are never requested both sides are the same path, which lets
+ * us split the line at its midpoint and verify.
+ */
+function pathsFromDiffGitLine(line: string): { oldPath: string; newPath: string } | null {
+  const rest = line.slice('diff --git '.length);
+  if (!rest.startsWith('a/')) {
+    return null;
+  }
+  const len = (rest.length - 'a/'.length - ' b/'.length) / 2;
+  if (Number.isInteger(len) && len >= 0) {
+    const candidate = rest.slice(2, 2 + len);
+    if (rest.slice(2 + len) === ` b/${candidate}`) {
+      return { oldPath: candidate, newPath: candidate };
+    }
+  }
+  // Fallback: split at the last " b/" (correct unless the path contains " b/")
+  const idx = rest.lastIndexOf(' b/');
+  if (idx < 0) {
+    return null;
+  }
+  return { oldPath: rest.slice(2, idx), newPath: rest.slice(idx + 3) };
+}
+
+/** Path from a "--- a/x" or "+++ b/x" line; "/dev/null" becomes ''. */
+function pathFromMarkerLine(line: string, marker: string): string {
+  let p = line.slice(marker.length);
+  // git appends a TAB when the path contains spaces
+  if (p.endsWith('\t')) {
+    p = p.slice(0, -1);
+  }
+  if (p === '/dev/null') {
+    return '';
+  }
+  return p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p;
 }
 
 function parseHunk(lines: string[], startIndex: number): { hunk: DiffHunk; nextIndex: number } {
@@ -120,9 +176,13 @@ function parseHunk(lines: string[], startIndex: number): { hunk: DiffHunk; nextI
       break;
     }
 
-    // Handle "\ No newline at end of file"
+    // "\ No newline at end of file" belongs to the line before it
     if (line.startsWith('\\ ')) {
       hunk.rawLines.push(line);
+      const prev = hunk.lines[hunk.lines.length - 1];
+      if (prev) {
+        prev.noNewline = true;
+      }
       i++;
       continue;
     }
@@ -194,6 +254,9 @@ export function splitHunks(hunks: DiffHunk[]): DiffHunk[] {
           groupNewCount++;
           newLine++;
         }
+        if (line.noNewline) {
+          groupRawLines.push(NO_NEWLINE);
+        }
         i++;
       }
 
@@ -217,6 +280,14 @@ export function splitHunks(hunks: DiffHunk[]): DiffHunk[] {
   }
 
   return result;
+}
+
+/**
+ * Build a unified diff patch for a single sub-hunk, suitable for piping to
+ * `git apply --unidiff-zero` (forward, reverse, or --cached).
+ */
+export function buildPatch(file: DiffFile, hunk: DiffHunk): string {
+  return [...file.diffHeader, ...hunk.rawLines].join('\n') + '\n';
 }
 
 /**
@@ -268,7 +339,12 @@ export function computeHunkIds(filePath: string, hunks: DiffHunk[]): string[] {
   return ids;
 }
 
-function extractPath(line: string, prefix: string): string {
-  const idx = line.indexOf(prefix);
-  return idx >= 0 ? line.slice(idx + prefix.length) : '';
+/** Sub-hunks with content IDs assigned, ready for a DiffFile. */
+export function prepareHunks(filePath: string, hunks: DiffHunk[]): DiffHunk[] {
+  const split = splitHunks(hunks);
+  const ids = computeHunkIds(filePath, split);
+  split.forEach((h, i) => {
+    h.id = ids[i];
+  });
+  return split;
 }
