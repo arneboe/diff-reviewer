@@ -1,364 +1,211 @@
-import * as vscode from 'vscode';
-import {
-  DiffFile,
-  DiffHunk,
-  HunkStatus,
-  UndoEntry,
-  diffFilePath,
-  fileKey,
-  fileKeyOf,
-} from '../types';
+import { buildPatch } from '../git/diffParser';
+import { fsModeFromGitMode } from '../git/gitAdapter';
 import { GitResolver } from '../git/repoManager';
+import { DiffFile, UndoEntry, diffFilePath } from '../types';
 
-const STORAGE_KEY = 'diffReviewer.hunkStatuses';
+/** Thrown when an undo entry can no longer be applied safely. */
+export class UndoRefusedError extends Error {}
 
+export type UndoneAction = 'approve' | 'reject';
+
+/**
+ * Executes review actions against git and keeps an in-memory undo stack.
+ *
+ * There is no status map any more: approved means staged, pending means
+ * unstaged, rejected means gone from the working tree. Every method returns
+ * the fresh DiffFile after the action, or null when the file has no unstaged
+ * change left.
+ */
 export class StateManager {
-  /** fileKey(repoRoot, filePath) → Map<hunkId, HunkStatus> */
-  private statuses = new Map<string, Map<string, HunkStatus>>();
   private undoStack: UndoEntry[] = [];
 
-  constructor(
-    private git: GitResolver,
-    private storage?: vscode.Memento,
-  ) {
-    if (this.storage) {
-      this.restoreFromStorage();
-    }
+  constructor(private git: GitResolver) {}
+
+  /** True when the file has to be handled as a whole (no per-hunk patches). */
+  static isWholeFile(file: DiffFile): boolean {
+    return file.isUntracked || file.isBinary || file.kind !== 'modified' || file.hunks.length === 0;
+  }
+
+  hasUndo(): boolean {
+    return this.undoStack.length > 0;
   }
 
   /**
-   * Sync statuses for a file: look up each hunk's ID in the map.
-   * Returns ordered HunkStatus[] matching file.hunks order for the webview.
-   * Stale IDs (hunks no longer in diff) are dropped.
+   * Approve a hunk: stage it. Whole-file cases stage the entire file.
    */
-  syncStatuses(file: DiffFile): HunkStatus[] {
-    const path = fileKeyOf(file);
-    const existing = this.statuses.get(path);
-
-    if (!existing || existing.size === 0) {
-      const map = new Map<string, HunkStatus>();
-      for (const hunk of file.hunks) {
-        if (hunk.id) {
-          map.set(hunk.id, 'pending');
-        }
-      }
-      this.statuses.set(path, map);
-      this.persist();
-      return file.hunks.map(() => 'pending');
+  async approve(file: DiffFile, hunkId: string): Promise<DiffFile | null> {
+    if (StateManager.isWholeFile(file)) {
+      return this.approveAll(file);
     }
-
-    // Build new map with only hunks present in the current diff
-    const newMap = new Map<string, HunkStatus>();
-    for (const hunk of file.hunks) {
-      if (hunk.id) {
-        newMap.set(hunk.id, existing.get(hunk.id) || 'pending');
-      }
-    }
-    this.statuses.set(path, newMap);
-    this.persist();
-
-    return file.hunks.map((h) => (h.id ? newMap.get(h.id) || 'pending' : 'pending'));
-  }
-
-  /**
-   * Get statuses as an ordered array matching file.hunks order.
-   */
-  getStatusArray(file: DiffFile): HunkStatus[] {
-    const map = this.statuses.get(fileKeyOf(file));
-    if (!map) {
-      return file.hunks.map(() => 'pending');
-    }
-    return file.hunks.map((h) => (h.id ? map.get(h.id) || 'pending' : 'pending'));
-  }
-
-  /**
-   * Raw stored statuses for a file, in insertion order. Mainly for tests.
-   */
-  getStatuses(repoRoot: string, filePath: string): HunkStatus[] {
-    const map = this.statuses.get(fileKey(repoRoot, filePath));
-    if (!map) {
-      return [];
-    }
-    return Array.from(map.values());
-  }
-
-  /**
-   * Check if all hunks in a file are resolved (all approved).
-   */
-  isFileResolved(repoRoot: string, filePath: string): boolean {
-    const map = this.statuses.get(fileKey(repoRoot, filePath));
-    if (!map || map.size === 0) {
-      return false;
-    }
-    for (const status of map.values()) {
-      if (status !== 'approved') {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Mark a hunk as approved by hunkId.
-   */
-  approve(file: DiffFile, hunkId: string): void {
-    const map = this.statuses.get(fileKeyOf(file));
-    if (!map || !map.has(hunkId)) {
-      return;
-    }
-    map.set(hunkId, 'approved');
-    this.undoStack.push({
-      type: 'approve',
-      repoRoot: file.repoRoot,
-      filePath: diffFilePath(file),
-      hunkId,
-    });
-    this.persist();
-  }
-
-  /**
-   * Approve all pending hunks in a file.
-   */
-  approveAll(file: DiffFile): void {
-    const map = this.statuses.get(fileKeyOf(file));
-    if (!map) {
-      return;
-    }
-    const filePath = diffFilePath(file);
-    for (const hunk of file.hunks) {
-      if (hunk.id && map.get(hunk.id) === 'pending') {
-        map.set(hunk.id, 'approved');
-        this.undoStack.push({
-          type: 'approve',
-          repoRoot: file.repoRoot,
-          filePath,
-          hunkId: hunk.id,
-        });
-      }
-    }
-    this.persist();
-  }
-
-  /**
-   * Reject all pending hunks in a file, one at a time (re-parsing after each).
-   */
-  async rejectAll(file: DiffFile): Promise<DiffFile | null> {
-    let currentFile: DiffFile | null = file;
-    const key = fileKeyOf(file);
-
-    while (currentFile) {
-      const map = this.statuses.get(key);
-      if (!map) {
-        break;
-      }
-
-      // Find first pending hunk
-      let pendingHunkId: string | undefined;
-      for (const hunk of currentFile.hunks) {
-        if (hunk.id && map.get(hunk.id) === 'pending') {
-          pendingHunkId = hunk.id;
-          break;
-        }
-      }
-      if (!pendingHunkId) {
-        break;
-      }
-
-      currentFile = await this.reject(currentFile, pendingHunkId);
-    }
-
-    return currentFile;
-  }
-
-  /**
-   * Reject a hunk: reverse-apply it on disk via git apply -R.
-   * Returns the updated DiffFile after re-parsing.
-   */
-  async reject(file: DiffFile, hunkId: string): Promise<DiffFile | null> {
     const hunk = file.hunks.find((h) => h.id === hunkId);
     if (!hunk) {
       return null;
     }
-
-    const filePath = diffFilePath(file);
-    const key = fileKeyOf(file);
     const git = this.git.getAdapter(file.repoRoot);
+    const filePath = diffFilePath(file);
+    const headSha = await git.headSha();
+    const patch = buildPatch(file, hunk);
+    await git.applyCached(patch);
+    this.undoStack.push({ type: 'stage', repoRoot: file.repoRoot, filePath, headSha, patch });
+    return git.getFileDiff(filePath);
+  }
 
-    if (file.isUntracked) {
-      await git.rejectUntrackedHunk(filePath, hunk);
-      this.undoStack.push({
-        type: 'reject',
-        repoRoot: file.repoRoot,
-        filePath,
-        hunkId,
-        untrackedInsert: {
-          lineIndex: hunk.newStart - 1,
-          lines: hunk.lines.map((l) => l.content),
-        },
-      });
-    } else {
-      const patch = buildPatch(file, hunk);
-      await git.applyReverse(patch);
-      this.undoStack.push({
-        type: 'reject',
-        repoRoot: file.repoRoot,
-        filePath,
-        hunkId,
-        forwardPatch: patch,
-      });
+  /**
+   * Approve everything unstaged in a file: `git add`.
+   */
+  async approveAll(file: DiffFile): Promise<DiffFile | null> {
+    const git = this.git.getAdapter(file.repoRoot);
+    const filePath = diffFilePath(file);
+    const headSha = await git.headSha();
+    const before = await git.readIndexEntry(filePath);
+    await git.addPath(filePath);
+    this.undoStack.push({ type: 'index', repoRoot: file.repoRoot, filePath, headSha, before });
+    return git.getFileDiff(filePath);
+  }
+
+  /**
+   * Reject a hunk: reverse-apply it on disk. Whole-file cases discard the
+   * entire unstaged change of the file.
+   */
+  async reject(file: DiffFile, hunkId: string): Promise<DiffFile | null> {
+    if (StateManager.isWholeFile(file)) {
+      return this.rejectWholeFile(file);
     }
-
-    const map = this.statuses.get(key);
-    if (map) {
-      map.delete(hunkId);
-    }
-
-    // Re-parse the file diff to get updated line numbers
-    const freshFiles = await git.getFileDiff(filePath);
-    if (freshFiles.length === 0) {
-      this.statuses.delete(key);
-      this.persist();
+    const hunk = file.hunks.find((h) => h.id === hunkId);
+    if (!hunk) {
       return null;
     }
-
-    const freshFile = freshFiles[0];
-    this.syncStatuses(freshFile);
-    return freshFile;
-  }
-
-  /**
-   * Undo a specific approval (reset to pending).
-   */
-  undoApprove(file: DiffFile, hunkId: string): void {
-    const map = this.statuses.get(fileKeyOf(file));
+    const git = this.git.getAdapter(file.repoRoot);
     const filePath = diffFilePath(file);
-    if (map && map.get(hunkId) === 'approved') {
-      map.set(hunkId, 'pending');
-      // Remove matching undo entry from the stack
-      for (let i = this.undoStack.length - 1; i >= 0; i--) {
-        const e = this.undoStack[i];
-        if (
-          e.type === 'approve' &&
-          e.repoRoot === file.repoRoot &&
-          e.filePath === filePath &&
-          e.hunkId === hunkId
-        ) {
-          this.undoStack.splice(i, 1);
-          break;
-        }
-      }
-      this.persist();
-    }
+    const headSha = await git.headSha();
+    const patch = buildPatch(file, hunk);
+    await git.applyReverse(patch);
+    this.undoStack.push({
+      type: 'worktree-patch',
+      repoRoot: file.repoRoot,
+      filePath,
+      headSha,
+      forwardPatch: patch,
+    });
+    return git.getFileDiff(filePath);
   }
 
   /**
-   * Undo the last action. Returns the affected file or null if stack is empty.
+   * Reject every unstaged change in a file. Tracked text files are rejected
+   * hunk by hunk (re-parsing after each) so every hunk gets its own undo
+   * entry; a remaining mode change is reverted afterwards.
    */
-  async undo(): Promise<{
-    repoRoot: string;
-    filePath: string;
-    undoneType: 'approve' | 'reject';
-  } | null> {
+  async rejectAll(file: DiffFile): Promise<DiffFile | null> {
+    if (StateManager.isWholeFile(file)) {
+      return this.rejectWholeFile(file);
+    }
+
+    let current: DiffFile | null = file;
+    while (current && current.hunks.length > 0 && !StateManager.isWholeFile(current)) {
+      current = await this.reject(current, current.hunks[0].id!);
+    }
+    if (current && current.modeChange) {
+      current = await this.rejectMode(current);
+    }
+    return current;
+  }
+
+  private async rejectMode(file: DiffFile): Promise<DiffFile | null> {
+    const git = this.git.getAdapter(file.repoRoot);
+    const filePath = diffFilePath(file);
+    const headSha = await git.headSha();
+    const previousMode = await git.worktreeMode(filePath);
+    await git.chmodWorktree(filePath, fsModeFromGitMode(file.modeChange!.from));
+    this.undoStack.push({
+      type: 'worktree-mode',
+      repoRoot: file.repoRoot,
+      filePath,
+      headSha,
+      previousMode,
+    });
+    return git.getFileDiff(filePath);
+  }
+
+  private async rejectWholeFile(file: DiffFile): Promise<DiffFile | null> {
+    const git = this.git.getAdapter(file.repoRoot);
+    const filePath = diffFilePath(file);
+    const headSha = await git.headSha();
+    const snapshot = await git.snapshotWorktreeFile(filePath);
+    // A file that only exists as an intent-to-add entry (kind 'added' but
+    // known to git) has no index content to restore; it is simply removed.
+    const wasIntentToAdd = file.kind === 'added' && !file.isUntracked;
+
+    if (file.isUntracked || wasIntentToAdd) {
+      await git.unlinkWorktreeFile(filePath);
+      if (wasIntentToAdd) {
+        await git.restoreIndexEntry(filePath, null);
+      }
+    } else {
+      await git.checkoutIndexPath(filePath);
+    }
+
+    this.undoStack.push({
+      type: 'worktree-file',
+      repoRoot: file.repoRoot,
+      filePath,
+      headSha,
+      content: snapshot.content,
+      mode: snapshot.mode,
+      wasIntentToAdd,
+    });
+    return git.getFileDiff(filePath);
+  }
+
+  /**
+   * Undo the last action. Returns the affected file or null if the stack is
+   * empty. Throws UndoRefusedError (after dropping the entry) when the
+   * repository moved on in a way that makes the undo unsafe.
+   */
+  async undo(): Promise<{ repoRoot: string; filePath: string; undone: UndoneAction } | null> {
     const entry = this.undoStack.pop();
     if (!entry) {
       return null;
     }
+    const git = this.git.getAdapter(entry.repoRoot);
 
-    if (entry.type === 'approve') {
-      const map = this.statuses.get(fileKey(entry.repoRoot, entry.filePath));
-      if (map && map.has(entry.hunkId)) {
-        map.set(entry.hunkId, 'pending');
-      }
-    } else if (entry.type === 'reject') {
-      const git = this.git.getAdapter(entry.repoRoot);
-      if (entry.forwardPatch) {
+    const head = await git.headSha();
+    if (head !== entry.headSha) {
+      throw new UndoRefusedError(
+        `Cannot undo: HEAD changed since the action on ${entry.filePath} (a commit was made).`,
+      );
+    }
+
+    switch (entry.type) {
+      case 'stage':
+        await git.applyCachedReverse(entry.patch);
+        break;
+      case 'index':
+        await git.restoreIndexEntry(entry.filePath, entry.before);
+        break;
+      case 'worktree-patch':
         await git.applyForward(entry.forwardPatch);
-      } else if (entry.untrackedInsert) {
-        await git.reInsertUntrackedLines(
-          entry.filePath,
-          entry.untrackedInsert.lineIndex,
-          entry.untrackedInsert.lines,
-        );
-      }
-    }
-
-    this.persist();
-    return { repoRoot: entry.repoRoot, filePath: entry.filePath, undoneType: entry.type };
-  }
-
-  /**
-   * Clear all state (e.g., on full refresh).
-   */
-  clear(): void {
-    this.statuses.clear();
-    this.undoStack = [];
-    this.persist();
-  }
-
-  /**
-   * Remove files that are no longer in the diff (e.g., after a commit).
-   */
-  pruneCommittedFiles(currentDiffFiles: DiffFile[]): void {
-    const currentPaths = new Set(currentDiffFiles.map((f) => fileKeyOf(f)));
-    let changed = false;
-    for (const path of this.statuses.keys()) {
-      if (!currentPaths.has(path)) {
-        this.statuses.delete(path);
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.persist();
-    }
-  }
-
-  private persist(): void {
-    if (!this.storage) {
-      return;
-    }
-    const data: Record<string, Record<string, HunkStatus>> = {};
-    for (const [key, map] of this.statuses) {
-      const obj: Record<string, HunkStatus> = {};
-      for (const [id, status] of map) {
-        // Only persist approved (pending is default, rejected hunks are gone)
-        if (status === 'approved') {
-          obj[id] = status;
+        break;
+      case 'worktree-file':
+        await git.restoreWorktreeFile(entry.filePath, entry.content, entry.mode);
+        if (entry.wasIntentToAdd) {
+          await git.addIntentToAdd(entry.filePath);
         }
-      }
-      if (Object.keys(obj).length > 0) {
-        data[key] = obj;
-      }
+        break;
+      case 'worktree-mode':
+        await git.chmodWorktree(entry.filePath, entry.previousMode);
+        break;
     }
-    this.storage.update(STORAGE_KEY, data);
+
+    const undone: UndoneAction =
+      entry.type === 'stage' || entry.type === 'index' ? 'approve' : 'reject';
+    return { repoRoot: entry.repoRoot, filePath: entry.filePath, undone };
   }
 
-  private restoreFromStorage(): void {
-    if (!this.storage) {
-      return;
-    }
-    const data = this.storage.get<Record<string, Record<string, HunkStatus>>>(STORAGE_KEY);
-    if (!data) {
-      return;
-    }
-    for (const [key, obj] of Object.entries(data)) {
-      // Entries persisted before multi-repo support were keyed by bare path
-      // and can never match again; drop them.
-      if (!key.includes('\0')) {
-        continue;
-      }
-      const map = new Map<string, HunkStatus>();
-      for (const [id, status] of Object.entries(obj)) {
-        map.set(id, status);
-      }
-      this.statuses.set(key, map);
-    }
+  /**
+   * Drop undo entries of a repository whose HEAD no longer matches; they
+   * could never be applied and would only produce refusals.
+   */
+  pruneForHead(repoRoot: string, headSha: string): void {
+    this.undoStack = this.undoStack.filter((e) => e.repoRoot !== repoRoot || e.headSha === headSha);
   }
-}
-
-/**
- * Build a valid unified diff patch string for a single hunk,
- * suitable for piping to `git apply`.
- */
-function buildPatch(file: DiffFile, hunk: DiffHunk): string {
-  return [...file.diffHeader, ...hunk.rawLines].join('\n') + '\n';
 }

@@ -1,7 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { RepoInfo, RepoManager } from '../git/repoManager';
-import { StateManager } from '../state/stateManager';
 import { DiffFile, diffFilePath } from '../types';
 
 /** Group node shown when more than one repository is present. */
@@ -24,10 +23,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private files: DiffFile[] = [];
   private repoNodes: RepoNode[] = [];
 
-  constructor(
-    private repos: RepoManager,
-    private stateManager: StateManager,
-  ) {}
+  constructor(private repos: RepoManager) {}
 
   /** Re-discover repositories and reload the aggregated diff. */
   async refresh(): Promise<void> {
@@ -85,22 +81,16 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private getRepoItem(node: RepoNode): vscode.TreeItem {
     const count = node.files.length;
-    const pendingFiles = node.files.filter(
-      (f) => !this.stateManager.isFileResolved(f.repoRoot, diffFilePath(f)),
-    ).length;
 
     const item = new vscode.TreeItem(node.repo.name, vscode.TreeItemCollapsibleState.Expanded);
     const location =
       node.repo.relativePath && node.repo.relativePath !== node.repo.name
         ? node.repo.relativePath
         : '';
-    const summary = `${count} file${count === 1 ? '' : 's'}, ${pendingFiles} pending`;
+    const summary = `${count} file${count === 1 ? '' : 's'} to review`;
     item.description = location ? `${location}  ·  ${summary}` : summary;
     item.tooltip = node.repo.root;
-    item.iconPath =
-      pendingFiles === 0
-        ? new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'))
-        : new vscode.ThemeIcon('repo');
+    item.iconPath = new vscode.ThemeIcon('repo');
     item.contextValue = 'diffRepo';
     item.id = `repo:${node.repo.root}`;
     return item;
@@ -110,24 +100,8 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const filePath = diffFilePath(element);
     const fileName = path.basename(filePath);
     const dirPath = path.dirname(filePath);
-    const resolved = this.stateManager.isFileResolved(element.repoRoot, filePath);
-
-    if (resolved) {
-      const item = new vscode.TreeItem(fileName, vscode.TreeItemCollapsibleState.None);
-      item.description = dirPath === '.' ? '' : dirPath + '/';
-      item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
-      item.contextValue = 'diffFileResolved';
-      item.id = `file:${element.repoRoot}:${filePath}`;
-      item.command = {
-        command: 'diffReviewer.openFile',
-        title: 'Open Diff View',
-        arguments: [element],
-      };
-      return item;
-    }
-
-    const statuses = this.stateManager.syncStatuses(element);
-    const pendingCount = statuses.filter((s) => s === 'pending').length;
+    // Zero-hunk files (binary, mode-only, empty) still count as one change.
+    const pendingCount = Math.max(1, element.hunks.length + (element.modeChange ? 1 : 0));
     const badge = pendingCount > 99 ? '99+' : String(pendingCount);
 
     const label: vscode.TreeItemLabel = {
@@ -138,8 +112,12 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     item.description = dirPath === '.' ? '' : dirPath + '/';
     item.contextValue = 'diffFile';
     item.id = `file:${element.repoRoot}:${filePath}`;
-    if (element.isUntracked) {
+    if (element.kind === 'added') {
       item.iconPath = new vscode.ThemeIcon('new-file');
+    } else if (element.kind === 'deleted') {
+      item.iconPath = new vscode.ThemeIcon('diff-removed');
+    } else if (element.isBinary) {
+      item.iconPath = new vscode.ThemeIcon('file-binary');
     }
     item.command = {
       command: 'diffReviewer.openFile',

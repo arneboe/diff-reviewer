@@ -1,448 +1,241 @@
 import * as assert from 'node:assert/strict';
-import { beforeEach, describe, it } from 'node:test';
-import type * as vscode from 'vscode';
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import { GitAdapter } from '../src/git/gitAdapter';
 import { GitResolver } from '../src/git/repoManager';
-import { StateManager } from '../src/state/stateManager';
-import { DiffFile, DiffHunk } from '../src/types';
+import { StateManager, UndoRefusedError } from '../src/state/stateManager';
+import { DiffFile } from '../src/types';
+import { GitSandbox, lines } from './helpers/gitSandbox';
 
-const REPO = '/work/repo-a';
-const OTHER_REPO = '/work/repo-b';
-
-// Minimal mock of GitAdapter
-class MockGitAdapter {
-  appliedReverse: string[] = [];
-  appliedForward: string[] = [];
-  nextFileDiff: DiffFile[] = [];
-
-  async applyReverse(patch: string) {
-    this.appliedReverse.push(patch);
-  }
-
-  async applyForward(patch: string) {
-    this.appliedForward.push(patch);
-  }
-
-  async getFileDiff(_filePath: string): Promise<DiffFile[]> {
-    return this.nextFileDiff;
-  }
-
-  async getDiff(): Promise<DiffFile[]> {
-    return this.nextFileDiff;
-  }
-}
-
-/** Resolver handing the same mock adapter to every repo, recording which roots were asked for. */
-function resolverFor(adapter: MockGitAdapter): GitResolver & { requestedRoots: string[] } {
-  const requestedRoots: string[] = [];
+function resolverFor(...sandboxes: GitSandbox[]): GitResolver & { requested: string[] } {
+  const adapters = new Map(sandboxes.map((s) => [s.root, new GitAdapter(s.root)]));
+  const requested: string[] = [];
   return {
-    requestedRoots,
+    requested,
     getAdapter(repoRoot: string) {
-      requestedRoots.push(repoRoot);
-      return adapter as unknown as ReturnType<GitResolver['getAdapter']>;
+      requested.push(repoRoot);
+      const adapter = adapters.get(repoRoot);
+      if (!adapter) {
+        throw new Error(`unknown repo ${repoRoot}`);
+      }
+      return adapter;
     },
   };
 }
 
-// Mock vscode.Memento for persistence tests
-class MockMemento {
-  private store = new Map<string, unknown>();
-  get<T>(key: string): T | undefined {
-    return this.store.get(key) as T | undefined;
-  }
-  async update(key: string, value: unknown): Promise<void> {
-    this.store.set(key, value);
-  }
-}
-
-let hunkCounter = 0;
-
-function makeHunk(overrides: Partial<DiffHunk> = {}): DiffHunk {
-  const id = `hunk-${++hunkCounter}`;
-  return {
-    oldStart: 1,
-    oldCount: 3,
-    newStart: 1,
-    newCount: 4,
-    header: '@@ -1,3 +1,4 @@',
-    lines: [
-      { type: 'context', content: 'hello' },
-      { type: 'remove', content: 'world' },
-      { type: 'add', content: 'beautiful world' },
-      { type: 'add', content: 'today' },
-      { type: 'context', content: 'end' },
-    ],
-    rawLines: ['@@ -1,3 +1,4 @@', ' hello', '-world', '+beautiful world', '+today', ' end'],
-    id,
-    ...overrides,
-  };
-}
-
-function makeFile(hunks: DiffHunk[] = [makeHunk()], repoRoot = REPO): DiffFile {
-  return {
-    repoRoot,
-    oldPath: 'test.txt',
-    newPath: 'test.txt',
-    hunks,
-    isBinary: false,
-    diffHeader: ['--- a/test.txt', '+++ b/test.txt'],
-  };
-}
-
 describe('StateManager', () => {
-  let git: MockGitAdapter;
-  let resolver: ReturnType<typeof resolverFor>;
+  let repo: GitSandbox;
+  let git: GitAdapter;
   let state: StateManager;
 
+  const load = async (path: string): Promise<DiffFile> => {
+    const file = await git.getFileDiff(path);
+    assert.ok(file, `${path} should have unstaged changes`);
+    return file;
+  };
+
   beforeEach(() => {
-    git = new MockGitAdapter();
-    resolver = resolverFor(git);
-    hunkCounter = 0;
-    state = new StateManager(resolver);
+    repo = new GitSandbox();
+    git = new GitAdapter(repo.root);
+    state = new StateManager(resolverFor(repo));
   });
 
-  describe('syncStatuses', () => {
-    it('initializes all hunks as pending', () => {
-      const file = makeFile([makeHunk(), makeHunk()]);
-      const statuses = state.syncStatuses(file);
-      assert.deepEqual(statuses, ['pending', 'pending']);
-    });
+  afterEach(() => repo.cleanup());
 
-    it('preserves existing statuses on re-sync by hunk ID', () => {
-      const hunk1 = makeHunk({ id: 'aaa' });
-      const hunk2 = makeHunk({ id: 'bbb' });
-      const file = makeFile([hunk1, hunk2]);
-      state.syncStatuses(file);
-      state.approve(file, 'aaa');
+  it('approve stages exactly one hunk and undo unstages it', async () => {
+    repo.write('a.txt', lines(10));
+    repo.commitAll();
+    repo.write('a.txt', lines(10).replace('l2', 'A').replace('l8', 'B'));
 
-      const statuses = state.syncStatuses(file);
-      assert.equal(statuses[0], 'approved');
-      assert.equal(statuses[1], 'pending');
-    });
+    const file = await load('a.txt');
+    assert.equal(file.hunks.length, 2);
+    const indexBefore = repo.lsFiles('a.txt');
 
-    it('drops stale IDs not in current diff', () => {
-      const hunk1 = makeHunk({ id: 'aaa' });
-      const hunk2 = makeHunk({ id: 'bbb' });
-      const file = makeFile([hunk1, hunk2]);
-      state.syncStatuses(file);
-      state.approve(file, 'aaa');
-      state.approve(file, 'bbb');
+    const after = await state.approve(file, file.hunks[1].id!);
+    assert.ok(after);
+    assert.equal(after.hunks.length, 1);
+    assert.match(repo.staged(), /\+B/);
+    assert.doesNotMatch(repo.staged(), /\+A/);
 
-      // Re-sync with only hunk2 remaining
-      const newFile = makeFile([hunk2]);
-      const statuses = state.syncStatuses(newFile);
-      assert.deepEqual(statuses, ['approved']);
-    });
+    const undone = await state.undo();
+    assert.equal(undone?.undone, 'approve');
+    assert.equal(repo.lsFiles('a.txt'), indexBefore);
+    assert.equal(repo.staged(), '');
+
+    // Approve again after undo works the same way
+    const again = await load('a.txt');
+    await state.approve(again, again.hunks[1].id!);
+    assert.match(repo.staged(), /\+B/);
   });
 
-  describe('approve', () => {
-    it('marks hunk as approved by ID', () => {
-      const hunk = makeHunk({ id: 'test-id' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      state.approve(file, 'test-id');
+  it('approving the last hunk leaves nothing to review', async () => {
+    repo.write('a.txt', lines(3));
+    repo.commitAll();
+    repo.write('a.txt', lines(3).replace('l2', 'X'));
 
-      const statuses = state.getStatusArray(file);
-      assert.equal(statuses[0], 'approved');
-    });
-
-    it('ignores unknown hunk ID', () => {
-      const file = makeFile();
-      state.syncStatuses(file);
-      state.approve(file, 'nonexistent'); // Should not throw
-    });
+    const file = await load('a.txt');
+    assert.equal(await state.approve(file, file.hunks[0].id!), null);
+    assert.equal(await git.getFileDiff('a.txt'), null);
   });
 
-  describe('reject', () => {
-    it('calls git applyReverse with a valid patch', async () => {
-      const hunk = makeHunk({ id: 'reject-me' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
+  it('reject discards a hunk on disk and undo restores it', async () => {
+    repo.write('a.txt', lines(10));
+    repo.commitAll();
+    const edited = 'top\n' + lines(10).replace('l8', 'B');
+    repo.write('a.txt', edited);
 
-      git.nextFileDiff = [];
+    const file = await load('a.txt');
+    const lower = file.hunks.find((h) => h.lines.some((l) => l.content === 'B'))!;
+    await state.reject(file, lower.id!);
+    assert.equal(repo.read('a.txt'), 'top\n' + lines(10));
 
-      await state.reject(file, 'reject-me');
-
-      assert.equal(git.appliedReverse.length, 1);
-      const patch = git.appliedReverse[0];
-      assert.ok(patch.includes('--- a/test.txt'));
-      assert.ok(patch.includes('+++ b/test.txt'));
-      assert.ok(patch.includes('@@ -1,3 +1,4 @@'));
-    });
-
-    it('returns null when no more hunks remain', async () => {
-      const hunk = makeHunk({ id: 'only-one' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      git.nextFileDiff = [];
-
-      const result = await state.reject(file, 'only-one');
-      assert.equal(result, null);
-    });
-
-    it('returns updated file when hunks remain', async () => {
-      const hunk1 = makeHunk({ id: 'h1' });
-      const hunk2 = makeHunk({ id: 'h2' });
-      const file = makeFile([hunk1, hunk2]);
-      state.syncStatuses(file);
-
-      const remainingFile = makeFile([makeHunk({ id: 'h2-fresh' })]);
-      git.nextFileDiff = [remainingFile];
-
-      const result = await state.reject(file, 'h1');
-      assert.ok(result);
-      assert.equal(result!.hunks.length, 1);
-    });
+    const undone = await state.undo();
+    assert.equal(undone?.undone, 'reject');
+    assert.equal(repo.read('a.txt'), edited);
   });
 
-  describe('undo', () => {
-    it('returns null when stack is empty', async () => {
-      const result = await state.undo();
-      assert.equal(result, null);
-    });
+  it('approve on an untracked file stages it; undo makes it untracked again', async () => {
+    repo.write('base.txt', 'x\n');
+    repo.commitAll();
+    repo.write('new.txt', 'a\nb\n');
 
-    it('undoes an approve by resetting to pending', async () => {
-      const hunk = makeHunk({ id: 'undo-me' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      state.approve(file, 'undo-me');
+    const file = await load('new.txt');
+    assert.equal(file.isUntracked, true);
+    assert.equal(await state.approve(file, file.hunks[0].id!), null);
+    assert.match(repo.status(), /^A {2}new\.txt$/m);
 
-      const result = await state.undo();
-      assert.ok(result);
-      assert.equal(result!.undoneType, 'approve');
-      assert.equal(state.getStatusArray(file)[0], 'pending');
-    });
-
-    it('undoes a reject by calling applyForward', async () => {
-      const hunk = makeHunk({ id: 'reject-then-undo' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      git.nextFileDiff = [];
-
-      await state.reject(file, 'reject-then-undo');
-
-      const result = await state.undo();
-      assert.ok(result);
-      assert.equal(result!.undoneType, 'reject');
-      assert.equal(git.appliedForward.length, 1);
-    });
+    await state.undo();
+    assert.match(repo.status(), /^\?\? new\.txt$/m);
   });
 
-  describe('isFileResolved', () => {
-    it('returns false when hunks are pending', () => {
-      const file = makeFile([makeHunk({ id: 'a' }), makeHunk({ id: 'b' })]);
-      state.syncStatuses(file);
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
-    });
+  it('reject on an untracked file deletes it; undo writes it back', async () => {
+    repo.write('base.txt', 'x\n');
+    repo.commitAll();
+    repo.write('new.txt', 'a\nb\n');
 
-    it('returns true when all hunks are approved', () => {
-      const file = makeFile([makeHunk({ id: 'a' }), makeHunk({ id: 'b' })]);
-      state.syncStatuses(file);
-      state.approve(file, 'a');
-      state.approve(file, 'b');
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
-    });
+    const file = await load('new.txt');
+    assert.equal(await state.reject(file, file.hunks[0].id!), null);
+    assert.doesNotMatch(repo.status(), /new\.txt/);
 
-    it('returns false for unknown file', () => {
-      assert.equal(state.isFileResolved(REPO, 'unknown.txt'), false);
-    });
+    await state.undo();
+    assert.equal(repo.read('new.txt'), 'a\nb\n');
+    assert.match(repo.status(), /^\?\? new\.txt$/m);
   });
 
-  describe('approveAll', () => {
-    it('approves all pending hunks', () => {
-      const hunks = [makeHunk({ id: 'x' }), makeHunk({ id: 'y' }), makeHunk({ id: 'z' })];
-      const file = makeFile(hunks);
-      state.syncStatuses(file);
-      state.approveAll(file);
+  it('reject on an intent-to-add file removes file and entry; undo restores both', async () => {
+    repo.write('base.txt', 'x\n');
+    repo.commitAll();
+    repo.write('ita.txt', 'hello\n');
+    repo.git('add', '-N', 'ita.txt');
 
-      const statuses = state.getStatusArray(file);
-      assert.deepEqual(statuses, ['approved', 'approved', 'approved']);
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
-    });
+    const file = await load('ita.txt');
+    await state.rejectAll(file);
+    assert.equal(repo.status(), '');
 
-    it('skips already approved hunks', () => {
-      const hunks = [makeHunk({ id: 'x' }), makeHunk({ id: 'y' })];
-      const file = makeFile(hunks);
-      state.syncStatuses(file);
-      state.approve(file, 'x');
-      state.approveAll(file);
-
-      const statuses = state.getStatusArray(file);
-      assert.deepEqual(statuses, ['approved', 'approved']);
-    });
+    await state.undo();
+    assert.equal(repo.read('ita.txt'), 'hello\n');
+    assert.match(repo.status(), /^ A ita\.txt$/m);
   });
 
-  describe('rejectAll', () => {
-    it('rejects all pending hunks', async () => {
-      const hunks = [makeHunk({ id: 'r1' }), makeHunk({ id: 'r2' })];
-      const file = makeFile(hunks);
-      state.syncStatuses(file);
+  it('approve file on an intent-to-add file, then undo, keeps the intent-to-add entry', async () => {
+    repo.write('base.txt', 'x\n');
+    repo.commitAll();
+    repo.write('ita.txt', 'hello\n');
+    repo.git('add', '-N', 'ita.txt');
 
-      const oneHunkFile = makeFile([makeHunk({ id: 'r2-fresh' })]);
+    await state.approveAll(await load('ita.txt'));
+    assert.match(repo.staged(), /\+hello/);
 
-      let rejectCount = 0;
-      git.getFileDiff = async (_filePath: string) => {
-        rejectCount++;
-        if (rejectCount >= 2) {
-          return [];
-        }
-        return [oneHunkFile];
-      };
-
-      const result = await state.rejectAll(file);
-      assert.equal(result, null);
-      assert.equal(git.appliedReverse.length, 2);
-    });
+    await state.undo();
+    assert.match(repo.status(), /^ A ita\.txt$/m);
+    assert.equal(repo.staged(), '');
   });
 
-  describe('clear', () => {
-    it('resets all state', async () => {
-      const hunk = makeHunk({ id: 'c1' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      state.approve(file, 'c1');
+  it('deleted file: approve stages the deletion, reject restores it', async () => {
+    repo.write('gone.txt', 'a\nb\n');
+    repo.commitAll();
+    repo.remove('gone.txt');
 
-      state.clear();
-      assert.deepEqual(state.getStatusArray(file), ['pending']);
-      const undoResult = await state.undo();
-      assert.equal(undoResult, null);
-    });
+    const file = await load('gone.txt');
+    await state.approve(file, file.hunks[0].id!);
+    assert.match(repo.status(), /^D {2}gone\.txt$/m);
+
+    await state.undo();
+    assert.match(repo.status(), /^ D gone\.txt$/m);
+
+    await state.reject(await load('gone.txt'), '');
+    assert.equal(repo.read('gone.txt'), 'a\nb\n');
+    assert.equal(repo.status(), '');
   });
 
-  describe('approved status survives hunk index shift', () => {
-    it('preserves approval when hunk moves to different index after new edits', () => {
-      // Initially: two hunks at index 0 and 1
-      const hunkA = makeHunk({ id: 'hunk-A' });
-      const hunkB = makeHunk({ id: 'hunk-B' });
-      const file1 = makeFile([hunkA, hunkB]);
-      state.syncStatuses(file1);
+  it('rejectAll reverts every hunk and a mode change, each undoable', async () => {
+    repo.write('s.sh', lines(10));
+    repo.commitAll();
+    repo.write('s.sh', lines(10).replace('l2', 'A').replace('l8', 'B'));
+    repo.chmod('s.sh', 0o755);
 
-      // Approve hunk B (index 1)
-      state.approve(file1, 'hunk-B');
+    assert.equal(await state.rejectAll(await load('s.sh')), null);
+    assert.equal(repo.status(), '');
 
-      // After new edits, a new hunk appears at index 0, pushing hunk-B to index 2
-      const newHunk = makeHunk({ id: 'hunk-NEW' });
-      const file2 = makeFile([newHunk, hunkA, hunkB]);
-      const statuses = state.syncStatuses(file2);
-
-      // hunk-B should still be approved even though it's now at index 2
-      assert.equal(statuses[0], 'pending'); // hunk-NEW
-      assert.equal(statuses[1], 'pending'); // hunk-A
-      assert.equal(statuses[2], 'approved'); // hunk-B preserved!
-    });
+    await state.undo(); // mode
+    await state.undo(); // one hunk
+    await state.undo(); // the other hunk
+    assert.equal(repo.read('s.sh'), lines(10).replace('l2', 'A').replace('l8', 'B'));
+    assert.ok((await git.worktreeMode('s.sh')) & 0o100, 'executable bit restored');
   });
 
-  describe('persistence', () => {
-    it('persists and restores approved statuses', () => {
-      const memento = new MockMemento();
-      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
+  it('refuses to undo an approval after a commit', async () => {
+    repo.write('a.txt', lines(3));
+    repo.commitAll();
+    repo.write('a.txt', lines(3).replace('l2', 'X'));
 
-      const hunk = makeHunk({ id: 'persist-me' });
-      const file = makeFile([hunk]);
-      state1.syncStatuses(file);
-      state1.approve(file, 'persist-me');
+    const file = await load('a.txt');
+    await state.approve(file, file.hunks[0].id!);
+    repo.git('commit', '-q', '-m', 'approved work');
 
-      // Create a new StateManager reading from the same memento (simulates restart)
-      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
-      const statuses = state2.getStatusArray(file);
-      assert.equal(statuses[0], 'approved');
-    });
-
-    it('does not persist pending statuses', () => {
-      const memento = new MockMemento();
-      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
-
-      const hunk = makeHunk({ id: 'pending-hunk' });
-      const file = makeFile([hunk]);
-      state1.syncStatuses(file);
-
-      // New StateManager should have no data for this file
-      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
-      assert.deepEqual(state2.getStatuses(REPO, 'test.txt'), []);
-    });
+    await assert.rejects(state.undo(), UndoRefusedError);
+    assert.equal(repo.staged(), '');
+    assert.equal(await state.undo(), null, 'the refused entry is dropped');
   });
 
-  describe('pruneCommittedFiles', () => {
-    it('removes files no longer in diff', () => {
-      const hunk = makeHunk({ id: 'prune-test' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      state.approve(file, 'prune-test');
+  it('pruneForHead drops entries recorded against another HEAD', async () => {
+    repo.write('a.txt', lines(3));
+    repo.commitAll();
+    repo.write('a.txt', lines(3).replace('l2', 'X'));
+    const file = await load('a.txt');
+    await state.approve(file, file.hunks[0].id!);
+    repo.git('commit', '-q', '-m', 'x');
 
-      // After commit, file is gone from diff
-      state.pruneCommittedFiles([]);
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
-      assert.deepEqual(state.getStatuses(REPO, 'test.txt'), []);
-    });
-
-    it('keeps files still in diff', () => {
-      const hunk = makeHunk({ id: 'keep-test' });
-      const file = makeFile([hunk]);
-      state.syncStatuses(file);
-      state.approve(file, 'keep-test');
-
-      state.pruneCommittedFiles([file]);
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
-    });
+    state.pruneForHead(repo.root, await git.headSha());
+    assert.equal(state.hasUndo(), false);
   });
 
-  describe('multiple repositories', () => {
-    it('keeps statuses separate for the same path in different repos', () => {
-      const fileA = makeFile([makeHunk({ id: 'same-id' })], REPO);
-      const fileB = makeFile([makeHunk({ id: 'same-id' })], OTHER_REPO);
-      state.syncStatuses(fileA);
-      state.syncStatuses(fileB);
+  it('routes actions and undo to the repository of each file', async () => {
+    const other = new GitSandbox();
+    try {
+      const resolver = resolverFor(repo, other);
+      state = new StateManager(resolver);
+      for (const r of [repo, other]) {
+        r.write('same.txt', lines(3));
+        r.commitAll();
+        r.write('same.txt', lines(3).replace('l2', 'X'));
+      }
+      const otherGit = new GitAdapter(other.root);
 
-      state.approve(fileA, 'same-id');
+      const a = (await git.getFileDiff('same.txt'))!;
+      await state.approve(a, a.hunks[0].id!);
+      const b = (await otherGit.getFileDiff('same.txt'))!;
+      await state.reject(b, b.hunks[0].id!);
 
-      assert.deepEqual(state.getStatusArray(fileA), ['approved']);
-      assert.deepEqual(state.getStatusArray(fileB), ['pending']);
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
-      assert.equal(state.isFileResolved(OTHER_REPO, 'test.txt'), false);
-    });
+      assert.match(repo.staged(), /\+X/);
+      assert.equal(other.status(), '');
 
-    it("routes reject and undo to the adapter of the file's repo", async () => {
-      const fileB = makeFile([makeHunk({ id: 'b1' })], OTHER_REPO);
-      state.syncStatuses(fileB);
-      git.nextFileDiff = [];
-
-      await state.reject(fileB, 'b1');
-      assert.deepEqual(resolver.requestedRoots, [OTHER_REPO]);
-
-      const result = await state.undo();
-      assert.ok(result);
-      assert.equal(result!.repoRoot, OTHER_REPO);
-      assert.equal(result!.filePath, 'test.txt');
-      assert.deepEqual(resolver.requestedRoots, [OTHER_REPO, OTHER_REPO]);
-      assert.equal(git.appliedForward.length, 1);
-    });
-
-    it('prunes only files missing from the aggregated diff', () => {
-      const fileA = makeFile([makeHunk({ id: 'a1' })], REPO);
-      const fileB = makeFile([makeHunk({ id: 'b1' })], OTHER_REPO);
-      state.syncStatuses(fileA);
-      state.syncStatuses(fileB);
-      state.approve(fileA, 'a1');
-      state.approve(fileB, 'b1');
-
-      state.pruneCommittedFiles([fileB]);
-
-      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
-      assert.equal(state.isFileResolved(OTHER_REPO, 'test.txt'), true);
-    });
-
-    it('persists per repo and drops legacy path-only entries', () => {
-      const memento = new MockMemento();
-      // Simulate data written by a version that keyed by bare path
-      memento.update('diffReviewer.hunkStatuses', { 'test.txt': { legacy: 'approved' } });
-
-      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
-      const fileB = makeFile([makeHunk({ id: 'p1' })], OTHER_REPO);
-      state1.syncStatuses(fileB);
-      state1.approve(fileB, 'p1');
-
-      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
-      assert.deepEqual(state2.getStatuses(OTHER_REPO, 'test.txt'), ['approved']);
-      assert.deepEqual(state2.getStatuses(REPO, 'test.txt'), []);
-    });
+      assert.equal((await state.undo())?.repoRoot, other.root);
+      assert.equal(other.read('same.txt'), lines(3).replace('l2', 'X'));
+      assert.equal((await state.undo())?.repoRoot, repo.root);
+      assert.equal(repo.staged(), '');
+      assert.equal(resolver.requested.includes(other.root), true);
+    } finally {
+      other.cleanup();
+    }
   });
 });

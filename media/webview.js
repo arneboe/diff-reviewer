@@ -12,7 +12,14 @@ let currentRepoRoot = '';
 let currentHighlightedLines = [];
 
 let autoScroll = true;
-let pendingAutoScroll = false;
+/**
+ * Line where the user last approved/rejected something. The next render
+ * scrolls to the first pending hunk at or after it; null keeps the scroll position.
+ * @type {number | null}
+ */
+let lastActionLine = null;
+/** True until the first file render in this panel. */
+let firstRender = true;
 
 const container = document.getElementById('container');
 
@@ -22,7 +29,9 @@ vscode.postMessage({ command: 'ready' });
 // Restore persisted state on reopen
 const savedState = vscode.getState();
 if (savedState && savedState.file) {
-  renderFile(savedState.file, savedState.hunkStatuses || [], savedState.fileContent || [], savedState.highlightedLines || []);
+  currentFilePath = savedState.file.newPath || savedState.file.oldPath;
+  currentRepoRoot = savedState.file.repoRoot || '';
+  renderFile(savedState.file, savedState.fileContent || [], savedState.highlightedLines || []);
 }
 
 // Listen for messages from the extension
@@ -30,39 +39,51 @@ window.addEventListener('message', (event) => {
   const msg = event.data;
 
   switch (msg.command) {
-    case 'showFile':
+    case 'showFile': {
       currentFilePath = msg.file.newPath || msg.file.oldPath;
       currentRepoRoot = msg.file.repoRoot || '';
       currentHighlightedLines = msg.highlightedLines || [];
-      renderFile(msg.file, msg.hunkStatuses, msg.fileContent || [], currentHighlightedLines);
-      vscode.setState({ file: msg.file, hunkStatuses: msg.hunkStatuses, fileContent: msg.fileContent || [], highlightedLines: currentHighlightedLines });
-      if (pendingAutoScroll && autoScroll) {
-        pendingAutoScroll = false;
-        requestAnimationFrame(() => scrollToFirstPendingHunk());
-      }
+      const scrollY = window.scrollY;
+      renderFile(msg.file, msg.fileContent || [], currentHighlightedLines);
+      vscode.setState({ file: msg.file, fileContent: msg.fileContent || [], highlightedLines: currentHighlightedLines });
+      restoreScroll(scrollY);
       break;
-
-    case 'updateHunk':
-      updateHunkStatus(msg.hunkIndex, msg.status);
-      break;
-
-    case 'clear':
-      if (container) {
-        container.innerHTML = '<div class="empty-notice">No diff data.</div>';
-      }
-      vscode.setState(undefined);
-      break;
+    }
   }
 });
 
 /**
- * Render the full file content with hunks inline.
+ * After a re-render: jump to the next pending hunk after an action, to the
+ * first one on the initial render, and otherwise keep the scroll position.
+ * @param {number} previousScrollY
+ */
+function restoreScroll(previousScrollY) {
+  requestAnimationFrame(() => {
+    buildScrollMap();
+    if (firstRender) {
+      firstRender = false;
+      if (autoScroll) scrollToFirstPendingHunk();
+      return;
+    }
+    if (lastActionLine !== null && autoScroll) {
+      const line = lastActionLine;
+      lastActionLine = null;
+      scrollToPendingHunkFrom(line);
+      return;
+    }
+    lastActionLine = null;
+    window.scrollTo(0, previousScrollY);
+  });
+}
+
+/**
+ * Render the full file content with pending hunks inline. Staged (approved)
+ * changes are part of the file content and render as ordinary lines.
  * @param {any} file - DiffFile
- * @param {string[]} hunkStatuses - Array of HunkStatus
  * @param {string[]} fileContent - Lines of the current file on disk
  * @param {string[]} highlightedLines - Pre-highlighted HTML per line
  */
-function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
+function renderFile(file, fileContent, highlightedLines) {
   if (!container) return;
   container.innerHTML = '';
 
@@ -94,18 +115,21 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
 
   container.appendChild(topBar);
 
-  const pendingCount = hunkStatuses.filter((/** @type {string} */ s) => s === 'pending').length;
-  createFloatingBar(filePath, pendingCount);
+  const fileLevelOnly = file.hunks.length === 0;
+  createFloatingBar(filePath, file.hunks.length, fileLevelOnly);
 
-  if (file.isBinary) {
+  const notices = fileNotices(file);
+  for (const text of notices) {
     const notice = document.createElement('div');
     notice.className = 'binary-notice';
-    notice.textContent = 'Binary file — no hunk-level review available.';
+    notice.textContent = text;
     container.appendChild(notice);
+  }
+  if (file.isBinary) {
     return;
   }
 
-  if (file.hunks.length === 0) {
+  if (file.hunks.length === 0 && notices.length === 0) {
     const notice = document.createElement('div');
     notice.className = 'empty-notice';
     notice.textContent = 'No changes in this file.';
@@ -116,11 +140,10 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
   const contentArea = document.createElement('div');
   contentArea.className = 'file-content';
 
-  /** @type {{ hunk: any, index: number, status: string }[]} */
+  /** @type {{ hunk: any, index: number }[]} */
   const hunkEntries = file.hunks.map((/** @type {any} */ h, /** @type {number} */ i) => ({
     hunk: h,
     index: i,
-    status: hunkStatuses[i] || 'pending',
   }));
 
   hunkEntries.sort((a, b) => a.hunk.newStart - b.hunk.newStart);
@@ -133,7 +156,7 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
 
     if (hunkPtr < hunkEntries.length && currentLine === hunkEntries[hunkPtr].hunk.newStart) {
       const entry = hunkEntries[hunkPtr];
-      const hunkEl = createInlineHunk(entry.hunk, entry.index, entry.status, filePath, highlightedLines);
+      const hunkEl = createInlineHunk(entry.hunk, entry.index, filePath, highlightedLines);
       contentArea.appendChild(hunkEl);
       fileLineIndex += entry.hunk.newCount;
       hunkPtr++;
@@ -153,7 +176,7 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
     } else {
       if (hunkPtr < hunkEntries.length) {
         const entry = hunkEntries[hunkPtr];
-        const hunkEl = createInlineHunk(entry.hunk, entry.index, entry.status, filePath, highlightedLines);
+        const hunkEl = createInlineHunk(entry.hunk, entry.index, filePath, highlightedLines);
         contentArea.appendChild(hunkEl);
         hunkPtr++;
       } else {
@@ -163,14 +186,29 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
   }
 
   container.appendChild(contentArea);
+}
 
-  // Build scroll map after layout is ready, then auto-scroll to first hunk
-  requestAnimationFrame(() => {
-    buildScrollMap();
-    if (autoScroll) {
-      scrollToFirstPendingHunk();
-    }
-  });
+/**
+ * File-level facts worth a notice above the content.
+ * @param {any} file
+ * @returns {string[]}
+ */
+function fileNotices(file) {
+  /** @type {string[]} */
+  const notices = [];
+  if (file.isBinary) {
+    notices.push('Binary file — review it as a whole with Accept file / Reject file.');
+  }
+  if (file.worktreeMissing) {
+    notices.push('This file was deleted.');
+  }
+  if (file.modeChange) {
+    notices.push(`File mode changed: ${file.modeChange.from} → ${file.modeChange.to}. Accept file stages it, Reject file reverts it.`);
+  }
+  if (!file.isBinary && file.hunks.length === 0 && !file.modeChange && file.kind === 'added') {
+    notices.push('New empty file.');
+  }
+  return notices;
 }
 
 /**
@@ -197,18 +235,18 @@ function createFileLine(lineNum, highlightedHtml) {
 }
 
 /**
- * Create an inline hunk element with syntax-highlighted diff lines.
+ * Create an inline pending hunk element with syntax-highlighted diff lines.
  * @param {any} hunk
  * @param {number} index
- * @param {string} status
  * @param {string} filePath
  * @param {string[]} highlightedLines - Full file highlighted lines
  * @returns {HTMLElement}
  */
-function createInlineHunk(hunk, index, status, filePath, highlightedLines) {
+function createInlineHunk(hunk, index, filePath, highlightedLines) {
   const el = document.createElement('div');
-  el.className = `inline-hunk ${status}`;
+  el.className = 'inline-hunk pending';
   el.dataset.hunkIndex = String(index);
+  el.dataset.newStart = String(hunk.newStart);
 
   let lastChangeIdx = -1;
   for (let i = hunk.lines.length - 1; i >= 0; i--) {
@@ -256,50 +294,15 @@ function createInlineHunk(hunk, index, status, filePath, highlightedLines) {
     el.appendChild(lineEl);
 
     if (i === lastChangeIdx) {
-      if (status === 'pending') {
-        el.appendChild(createHunkActions(filePath, index));
-      } else if (status === 'approved') {
-        el.appendChild(createUndoBadge(filePath, index));
-      } else {
-        const badge = document.createElement('span');
-        badge.className = `hunk-status-badge ${status}`;
-        badge.textContent = status;
-        el.appendChild(badge);
-      }
+      el.appendChild(createHunkActions(filePath, hunk, index));
     }
   }
 
   if (lastChangeIdx === -1) {
-    if (status === 'pending') {
-      el.appendChild(createHunkActions(filePath, index));
-    }
+    el.appendChild(createHunkActions(filePath, hunk, index));
   }
 
   return el;
-}
-
-/**
- * Create an "APPROVED" badge that turns into "UNDO" on hover.
- * @param {string} filePath
- * @param {number} index
- * @returns {HTMLElement}
- */
-function createUndoBadge(filePath, index) {
-  const badge = document.createElement('span');
-  badge.className = 'hunk-status-badge approved undoable';
-  badge.textContent = 'approved';
-  badge.addEventListener('mouseenter', () => {
-    badge.textContent = 'undo';
-    badge.classList.add('undo-hover');
-  });
-  badge.addEventListener('mouseleave', () => {
-    badge.textContent = 'approved';
-    badge.classList.remove('undo-hover');
-  });
-  badge.addEventListener('click', () => {
-    vscode.postMessage({ command: 'undo', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
-  });
-  return badge;
 }
 
 /**
@@ -339,10 +342,11 @@ function makeRejectWithConfirm(btn, originalLabel, onConfirm, resetPeer) {
 
 /**
  * @param {string} filePath
+ * @param {any} hunk
  * @param {number} index
  * @returns {HTMLElement}
  */
-function createHunkActions(filePath, index) {
+function createHunkActions(filePath, hunk, index) {
   const actionsEl = document.createElement('div');
   actionsEl.className = 'hunk-inline-actions';
 
@@ -350,15 +354,16 @@ function createHunkActions(filePath, index) {
   approveBtn.className = 'btn-approve';
   approveBtn.textContent = 'Approve';
   approveBtn.addEventListener('click', () => {
-    vscode.postMessage({ command: 'approve', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
+    lastActionLine = hunk.newStart;
+    vscode.postMessage({ command: 'approve', repoRoot: currentRepoRoot, filePath, hunkIndex: index, hunkId: hunk.id });
   });
 
   const rejectBtn = document.createElement('button');
   rejectBtn.className = 'btn-reject';
   rejectBtn.textContent = 'Reject';
   makeRejectWithConfirm(rejectBtn, 'Reject', () => {
-    pendingAutoScroll = true;
-    vscode.postMessage({ command: 'reject', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
+    lastActionLine = hunk.newStart;
+    vscode.postMessage({ command: 'reject', repoRoot: currentRepoRoot, filePath, hunkIndex: index, hunkId: hunk.id });
   });
 
   actionsEl.appendChild(approveBtn);
@@ -367,81 +372,12 @@ function createHunkActions(filePath, index) {
 }
 
 /**
- * @param {number} hunkIndex
- * @param {string} status
- */
-function updateHunkStatus(hunkIndex, status) {
-  const hunkEl = container?.querySelector(`.inline-hunk[data-hunk-index="${hunkIndex}"]`);
-  if (!hunkEl) return;
-
-  hunkEl.className = `inline-hunk ${status}`;
-
-  const oldActions = hunkEl.querySelector('.hunk-inline-actions');
-  if (oldActions) oldActions.remove();
-  const oldBadge = hunkEl.querySelector('.hunk-status-badge');
-  if (oldBadge) oldBadge.remove();
-
-  const diffLines = hunkEl.querySelectorAll('.diff-line');
-  let insertAfter = null;
-  for (let i = diffLines.length - 1; i >= 0; i--) {
-    if (diffLines[i].classList.contains('add') || diffLines[i].classList.contains('remove')) {
-      insertAfter = diffLines[i];
-      break;
-    }
-  }
-
-  if (status === 'pending') {
-    const actionsEl = createHunkActions(currentFilePath, hunkIndex);
-    if (insertAfter && insertAfter.nextSibling) {
-      hunkEl.insertBefore(actionsEl, insertAfter.nextSibling);
-    } else {
-      hunkEl.appendChild(actionsEl);
-    }
-  } else if (status === 'approved') {
-    const badge = createUndoBadge(currentFilePath, hunkIndex);
-    if (insertAfter && insertAfter.nextSibling) {
-      hunkEl.insertBefore(badge, insertAfter.nextSibling);
-    } else {
-      hunkEl.appendChild(badge);
-    }
-  } else {
-    const badge = document.createElement('span');
-    badge.className = `hunk-status-badge ${status}`;
-    badge.textContent = status;
-    if (insertAfter && insertAfter.nextSibling) {
-      hunkEl.insertBefore(badge, insertAfter.nextSibling);
-    } else {
-      hunkEl.appendChild(badge);
-    }
-  }
-
-  const state = vscode.getState();
-  if (state && state.hunkStatuses) {
-    state.hunkStatuses[hunkIndex] = status;
-    vscode.setState(state);
-  }
-
-  // Update floating bar based on pending hunks
-  if (container) {
-    const pendingHunks = container.querySelectorAll('.inline-hunk.pending');
-    createFloatingBar(currentFilePath, pendingHunks.length);
-  }
-
-  // Auto-scroll to next pending hunk after approve
-  if (autoScroll && status !== 'pending') {
-    scrollToNextPendingHunk(hunkIndex);
-  }
-
-  // Refresh scroll map after status change
-  requestAnimationFrame(() => buildScrollMap());
-}
-
-/**
  * Create (or recreate) the floating action bar at the bottom-center.
  * @param {string} filePath
  * @param {number} pendingCount
+ * @param {boolean} fileLevelOnly - file has changes but no reviewable hunks
  */
-function createFloatingBar(filePath, pendingCount) {
+function createFloatingBar(filePath, pendingCount, fileLevelOnly) {
   const existing = document.getElementById('floating-bar');
   if (existing) existing.remove();
 
@@ -449,11 +385,11 @@ function createFloatingBar(filePath, pendingCount) {
   bar.className = 'floating-bar';
   bar.id = 'floating-bar';
 
-  const hasPending = pendingCount > 0;
+  const hasPending = pendingCount > 0 || fileLevelOnly;
 
   const countEl = document.createElement('span');
   countEl.className = 'pending-count';
-  countEl.textContent = hasPending ? `${pendingCount} left` : 'All reviewed';
+  countEl.textContent = pendingCount > 0 ? `${pendingCount} left` : fileLevelOnly ? 'Whole file' : 'All reviewed';
   bar.appendChild(countEl);
 
   if (hasPending) {
@@ -468,7 +404,6 @@ function createFloatingBar(filePath, pendingCount) {
     acceptBtn.className = 'btn-approve';
     acceptBtn.textContent = 'Accept file';
     const resetAccept = makeRejectWithConfirm(acceptBtn, 'Accept file', () => {
-      pendingAutoScroll = true;
       vscode.postMessage({ command: 'approveAll', repoRoot: currentRepoRoot, filePath });
     }, () => peerRef.reset());
     bar.appendChild(acceptBtn);
@@ -477,7 +412,6 @@ function createFloatingBar(filePath, pendingCount) {
     rejectBtn.className = 'btn-reject';
     rejectBtn.textContent = 'Reject file';
     peerRef.reset = makeRejectWithConfirm(rejectBtn, 'Reject file', () => {
-      pendingAutoScroll = true;
       vscode.postMessage({ command: 'rejectAll', repoRoot: currentRepoRoot, filePath });
     }, resetAccept);
     bar.appendChild(rejectBtn);
@@ -526,14 +460,17 @@ function createFloatingBar(filePath, pendingCount) {
   settingsWrap.appendChild(settingsBtn);
   bar.appendChild(settingsWrap);
 
-  document.addEventListener('click', (e) => {
-    if (!settingsWrap.contains(/** @type {Node} */ (e.target))) {
-      dropUp.classList.remove('open');
-    }
-  });
-
   document.body.appendChild(bar);
 }
+
+// Close the options drop-up on any click outside it (registered once).
+document.addEventListener('click', (e) => {
+  const wrap = document.querySelector('.settings-wrap');
+  const dropUp = document.querySelector('.drop-up');
+  if (wrap && dropUp && !wrap.contains(/** @type {Node} */ (e.target))) {
+    dropUp.classList.remove('open');
+  }
+});
 
 /**
  * Navigate to the previous or next pending hunk relative to the current scroll position.
@@ -598,31 +535,16 @@ function createAutoScrollCheckbox() {
 }
 
 /**
- * Scroll to the next pending hunk after the given hunk index (DOM order).
- * Wraps around to the first pending hunk if none found after current.
- * @param {number} currentHunkIndex
+ * Scroll to the first pending hunk starting at or after the given line,
+ * wrapping around to the first pending hunk.
+ * @param {number} line
  */
-function scrollToNextPendingHunk(currentHunkIndex) {
+function scrollToPendingHunkFrom(line) {
   if (!container) return;
-
-  const allHunks = container.querySelectorAll('.inline-hunk');
-  let foundCurrent = false;
-
-  for (const hunk of allHunks) {
-    if (Number(hunk.dataset.hunkIndex) === currentHunkIndex) {
-      foundCurrent = true;
-      continue;
-    }
-    if (foundCurrent && hunk.classList.contains('pending')) {
-      hunk.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-  }
-
-  // Wrap around to first pending
-  const firstPending = container.querySelector('.inline-hunk.pending');
-  if (firstPending) {
-    firstPending.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const hunks = /** @type {HTMLElement[]} */ (Array.from(container.querySelectorAll('.inline-hunk.pending')));
+  const target = hunks.find((h) => Number(h.dataset.newStart) >= line) || hunks[0];
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 }
 
@@ -647,7 +569,7 @@ function buildScrollMap() {
 
   if (!container) return;
 
-  const visibleHunks = container.querySelectorAll('.inline-hunk.pending, .inline-hunk.approved');
+  const visibleHunks = container.querySelectorAll('.inline-hunk.pending');
   if (visibleHunks.length === 0) return;
 
   const totalHeight = document.documentElement.scrollHeight;
@@ -663,8 +585,6 @@ function buildScrollMap() {
     const absTop = rect.top + scrollTop;
     const absHeight = rect.height;
 
-    const isApproved = hunkEl.classList.contains('approved');
-
     // Determine marker type based on diff line types present
     const hasAdd = hunkEl.querySelector('.diff-line.add') !== null;
     const hasRemove = hunkEl.querySelector('.diff-line.remove') !== null;
@@ -672,7 +592,6 @@ function buildScrollMap() {
     if (hasAdd && !hasRemove) markerClass = 'add';
     else if (hasRemove && !hasAdd) markerClass = 'remove';
 
-    if (isApproved) markerClass += ' approved';
 
     const marker = document.createElement('div');
     marker.className = `scroll-map-marker ${markerClass}`;

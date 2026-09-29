@@ -2,6 +2,31 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [2.0.0] — 2026-09-29
+
+### Changed
+- **Approve now stages.** Approving a hunk runs `git apply --cached` for just that change group; approving a file runs `git add`. The git index is the approval state, so the next commit contains exactly what was approved
+- The sidebar ("Unstaged Changes") and the diff view show only unstaged changes (index → working tree) and untracked files. Anything already staged counts as approved and is not shown; fully approved files leave the sidebar
+- Approved hunks are no longer drawn as highlighted blocks; they appear as ordinary file lines
+- Undo of an approval unstages it. Undo is refused once a commit was made in that repository
+- Refresh no longer clears approvals
+- Renames are shown as a deletion plus an addition
+
+### Added
+- Deleted files, binary files, empty new files and file-mode changes are listed and can be approved or rejected as a whole
+- Watcher on each repository's `.git/index` and `HEAD`, so `git add`, `git reset` and `git commit` from a terminal update the sidebar
+- Welcome texts for "everything is staged" and "no changes"
+
+### Fixed
+- Deleted files were keyed as `/dev/null`
+- Patches for the last line of a file without a trailing newline failed because the marker was dropped when splitting hunks
+- Duplicate-content hunks could receive colliding IDs
+- The options menu in the diff view registered a new document click listener on every render
+
+### Removed
+- Stored approvals in workspace state (`diffReviewer.hunkStatuses`); they are deleted on first activation
+- The per-hunk "approved" badge and its hover undo
+
 ## [1.2.2] — 2026-09-29
 
 ### Changed

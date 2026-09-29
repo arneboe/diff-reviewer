@@ -3,13 +3,14 @@ import * as assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseDiff, splitHunks } from '../src/git/diffParser';
+import { computeHunkIds, parseDiff, splitHunks } from '../src/git/diffParser';
 
 const __dirname =
   typeof import.meta.dirname === 'string'
     ? import.meta.dirname
     : dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, 'fixtures');
+const fixture = (name: string) => parseDiff(readFileSync(join(fixturesDir, name), 'utf-8'));
 
 describe('parseDiff', () => {
   it('parses a simple single-file, single-hunk diff', () => {
@@ -101,6 +102,67 @@ Binary files a/image.png and b/image.png differ
     const files = parseDiff(raw);
     assert.equal(files.length, 1);
     assert.equal(files[0].isBinary, true);
+    assert.equal(files[0].newPath, 'image.png');
+  });
+
+  it('takes paths from the diff --git line for deleted files', () => {
+    const [file] = fixture('deleted.diff');
+    assert.equal(file.oldPath, 'gone.txt');
+    assert.equal(file.newPath, 'gone.txt');
+    assert.equal(file.kind, 'deleted');
+    assert.equal(file.worktreeMissing, true);
+    assert.deepEqual(file.diffHeader, ['--- a/gone.txt', '+++ /dev/null']);
+  });
+
+  it('marks new files as added', () => {
+    const [file] = fixture('newfile.diff');
+    assert.equal(file.kind, 'added');
+    assert.equal(file.newPath, 'fresh.txt');
+    assert.equal(file.hunks.length, 1);
+  });
+
+  it('keeps a mode-only change as a file without hunks', () => {
+    const [file] = fixture('mode-only.diff');
+    assert.equal(file.newPath, 'mode.sh');
+    assert.equal(file.hunks.length, 0);
+    assert.deepEqual(file.modeChange, { from: '100644', to: '100755' });
+  });
+
+  it('parses binary files with their path', () => {
+    const [file] = fixture('binary.diff');
+    assert.equal(file.isBinary, true);
+    assert.equal(file.newPath, 'pic.png');
+  });
+
+  it('handles paths with spaces', () => {
+    const [file] = fixture('space-path.diff');
+    assert.equal(file.newPath, 'sp ace.txt');
+    assert.equal(file.oldPath, 'sp ace.txt');
+  });
+
+  it('flags lines followed by "No newline at end of file"', () => {
+    const [file] = fixture('nonl.diff');
+    const flagged = file.hunks[0].lines.filter((l) => l.noNewline).map((l) => l.content);
+    assert.deepEqual(flagged, ['two', 'three']);
+  });
+});
+
+describe('computeHunkIds', () => {
+  it('suffixes every duplicate, including the first', () => {
+    const hunk = {
+      oldStart: 1,
+      oldCount: 1,
+      newStart: 1,
+      newCount: 1,
+      header: '',
+      lines: [{ type: 'add' as const, content: 'same' }],
+      rawLines: [],
+    };
+    const ids = computeHunkIds('f.txt', [hunk, { ...hunk }, { ...hunk }]);
+    assert.equal(new Set(ids).size, 3);
+    assert.ok(ids[0].endsWith('-1'));
+    assert.ok(ids[1].endsWith('-2'));
+    assert.ok(ids[2].endsWith('-3'));
   });
 });
 
@@ -238,5 +300,18 @@ describe('splitHunks', () => {
     assert.equal(hunks[0].oldCount, 2);
     assert.equal(hunks[0].newCount, 0);
     assert.equal(hunks[0].newStart, 11); // position after "keep" line
+  });
+
+  it('re-emits the no-newline marker in sub-hunk patches', () => {
+    const [file] = fixture('nonl.diff');
+    const [hunk] = splitHunks(file.hunks);
+    assert.deepEqual(hunk.rawLines, [
+      '@@ -2,1 +2,2 @@',
+      '-two',
+      '\\ No newline at end of file',
+      '+two',
+      '+three',
+      '\\ No newline at end of file',
+    ]);
   });
 });

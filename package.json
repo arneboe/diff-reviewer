@@ -1,8 +1,8 @@
 {
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
-  "description": "Interactive diff review UI for approving or rejecting individual hunks",
-  "version": "1.2.2",
+  "description": "Interactive diff review UI: approve (stage) or reject (discard) individual hunks",
+  "version": "2.0.0",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {
@@ -54,7 +54,7 @@
       "diffReviewer": [
         {
           "id": "diffReviewer.fileTree",
-          "name": "Modified Files"
+          "name": "Unstaged Changes"
         }
       ]
     },
@@ -63,6 +63,16 @@
         "view": "diffReviewer.fileTree",
         "contents": "No git repositories found in the open folders.\nNested repositories are searched up to the depth set by `diffReviewer.repoScanDepth`.\n[Refresh](command:diffReviewer.refresh)",
         "when": "diffReviewer.noRepos"
+      },
+      {
+        "view": "diffReviewer.fileTree",
+        "contents": "All changes are staged and count as approved.\nCommit them, or run `git reset` to review them again.\n[Refresh](command:diffReviewer.refresh)",
+        "when": "diffReviewer.allStaged"
+      },
+      {
+        "view": "diffReviewer.fileTree",
+        "contents": "No uncommitted changes.\n[Refresh](command:diffReviewer.refresh)",
+        "when": "diffReviewer.clean"
       }
     ],
     "configuration": {
@@ -93,12 +103,12 @@
       },
       {
         "command": "diffReviewer.approveFile",
-        "title": "Approve File",
+        "title": "Approve File (stage)",
         "icon": "$(check)"
       },
       {
         "command": "diffReviewer.rejectFile",
-        "title": "Reject File",
+        "title": "Reject File (discard)",
         "icon": "$(close)"
       }
     ],
