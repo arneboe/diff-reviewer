@@ -2,6 +2,18 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [2.1.0] — 2026-09-29
+
+### Added
+- When an approve or reject finishes the file shown in the diff view, the next file to review opens automatically
+
+### Changed
+- Approve and reject update only the affected file. File and git-index changes re-read only the repository they belong to. Repository discovery runs only at startup, when workspace folders or `diffReviewer.repoScanDepth` change, when a repository appears, and on Refresh; approving in a folder with many repositories no longer takes seconds
+
+### Fixed
+- An approve or reject clicked while a refresh was running could act on a stale diff; all git actions and refreshes now run one at a time
+- A refresh that arrived before a new diff view finished loading was lost
+
 ## [2.0.0] — 2026-09-29
 
 ### Changed

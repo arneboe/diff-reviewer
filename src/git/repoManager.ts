@@ -1,5 +1,4 @@
 import * as path from 'path';
-import { DiffFile } from '../types';
 import { GitAdapter } from './gitAdapter';
 import { discoverRepos } from './repoDiscovery';
 
@@ -16,7 +15,6 @@ export interface RepoInfo {
 export interface RepoState {
   headSha: string;
   hasStaged: boolean;
-  gitDir: string;
 }
 
 /** Minimal interface StateManager needs to reach a repository's git adapter. */
@@ -25,8 +23,7 @@ export interface GitResolver {
 }
 
 /**
- * Owns one GitAdapter per discovered repository and aggregates diffs across
- * all of them.
+ * Owns one GitAdapter per discovered repository.
  */
 export class RepoManager implements GitResolver {
   private adapters = new Map<string, GitAdapter>();
@@ -84,44 +81,24 @@ export class RepoManager implements GitResolver {
     return adapter;
   }
 
-  /**
-   * Unstaged diff of every repository, in repo order. A repository whose diff
-   * fails is skipped so the others still show up.
-   */
-  async getDiff(): Promise<DiffFile[]> {
-    const results = await Promise.allSettled(
-      this.repos.map((r) => this.getAdapter(r.root).getDiff()),
-    );
-    const files: DiffFile[] = [];
-    results.forEach((res, i) => {
-      if (res.status === 'fulfilled') {
-        files.push(...res.value);
-      } else {
-        console.error(`Diff Reviewer: failed to diff ${this.repos[i].root}:`, res.reason);
+  /** Repository root containing an absolute path (innermost match), if any. */
+  repoForPath(absPath: string): string | undefined {
+    let best: string | undefined;
+    for (const r of this.repos) {
+      if (absPath === r.root || absPath.startsWith(r.root + path.sep)) {
+        if (!best || r.root.length > best.length) {
+          best = r.root;
+        }
       }
-    });
-    return files;
+    }
+    return best;
   }
 
-  /** HEAD, staged-ness and git dir of every discovered repository. */
-  async getRepoStates(): Promise<Map<string, RepoState>> {
-    const states = new Map<string, RepoState>();
-    await Promise.all(
-      this.repos.map(async (r) => {
-        const adapter = this.getAdapter(r.root);
-        try {
-          const [headSha, hasStaged, gitDir] = await Promise.all([
-            adapter.headSha(),
-            adapter.hasStagedChanges(),
-            adapter.gitDir(),
-          ]);
-          states.set(r.root, { headSha, hasStaged, gitDir });
-        } catch (err) {
-          console.error(`Diff Reviewer: failed to read state of ${r.root}:`, err);
-        }
-      }),
-    );
-    return states;
+  /** HEAD and staged-ness of one repository. */
+  async getRepoState(repoRoot: string): Promise<RepoState> {
+    const adapter = this.getAdapter(repoRoot);
+    const [headSha, hasStaged] = await Promise.all([adapter.headSha(), adapter.hasStagedChanges()]);
+    return { headSha, hasStaged };
   }
 
   private relativeToWorkspace(root: string): string {

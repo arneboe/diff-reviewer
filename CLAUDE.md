@@ -31,7 +31,7 @@ Pre-commit hook runs `npm run lint:fix && npm run ts:check`.
 - `git/gitAdapter.ts` — Shells out to `git` CLI within a single repo: unstaged diff (`git diff`, no `HEAD`), untracked files, `git apply` (worktree and `--cached`, forward/reverse), `git add`, index-entry read/restore (incl. intent-to-add), `checkout-index`; stamps `repoRoot` on every `DiffFile`
 - `git/diffParser.ts` — Parses unified diff text into `DiffFile`/`DiffHunk` structures (paths from the `diff --git` line, file kind, mode changes, no-newline markers), then `splitHunks()` breaks each hunk into granular sub-hunks (one per contiguous change group). `buildPatch()` turns one sub-hunk into a `git apply --unidiff-zero` patch. Content-based hunk IDs (FNV-1a) let the webview address a hunk safely
 - `state/stateManager.ts` — Executes approve/reject (per hunk or whole file) against git and keeps an in-memory undo stack. No status map: approved = staged, pending = unstaged, rejected = gone. Undo entries record HEAD and are refused/pruned once HEAD moves
-- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar; lists files with unstaged changes only; flat list for one repo, one expandable node per repo with changes when several are discovered
+- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar; lists files with unstaged changes only, updated per repo (`setRepoFiles`) or per file (`updateFile`); flat list for one repo, one expandable node per repo with changes when several are discovered
 - `webview/diffPanelProvider.ts` — Creates/manages webview panels, handles message passing
 - `highlighter.ts` — Server-side syntax highlighting via highlight.js, splits highlighted HTML across line boundaries
 
@@ -44,7 +44,9 @@ Pre-commit hook runs `npm run lint:fix && npm run ts:check`.
 - Patches for staging come from the index → worktree diff, so their old-side line numbers are index-relative and `git apply --cached --unidiff-zero` lands exactly even when unstaged edits sit above the hunk
 - Whole-file handling (`git add`, `checkout-index`, unlink) for untracked, intent-to-add, deleted, binary, mode-only and empty files
 - Files are identified by `fileKey(repoRoot, filePath)` everywhere (panels, webview messages, undo), since the same relative path can exist in several repos
-- Every action re-reads the file diff; `.git/index` and `HEAD` are watched so terminal `git add`/`reset`/`commit` refresh the UI
+- Refresh is scoped: an action re-reads and updates only its file; workspace-file and `.git/index`/`HEAD` watcher events re-read only the repository they belong to; repository discovery (slow for large parent folders) runs only at startup, on workspace/setting changes, when a `.git` appears or disappears, and on the Refresh button
+- All git mutations and refreshes are serialised through one promise queue in `extension.ts`; actions re-read their file inside the queue before touching git
+- Panels skip re-rendering when the file and its content are unchanged (signature in `diffPanelProvider.ts`)
 
 ## Testing
 
