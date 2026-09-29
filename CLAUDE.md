@@ -31,7 +31,7 @@ Pre-commit hook runs `npm run lint:fix && npm run ts:check`.
 - `git/gitAdapter.ts` — Shells out to `git` CLI for diffs, file content, and `git apply` (forward/reverse) within a single repo; stamps `repoRoot` on every `DiffFile`
 - `git/diffParser.ts` — Parses unified diff text into `DiffFile`/`DiffHunk` structures, then `splitHunks()` breaks each hunk into granular sub-hunks (one per contiguous change group) for per-change-group review. Computes content-based hunk IDs (FNV-1a hash) for stable tracking across re-parses
 - `state/stateManager.ts` — Tracks hunk statuses (`pending`/`approved`/`rejected`) by content-based hunk ID (not index), keyed per `(repoRoot, filePath)`, manages undo stack, persists approved statuses to `vscode.Memento`
-- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar; flat file list for one repo, one expandable node per repo when several are present
+- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar; flat file list for one repo, one expandable node per repo with changes when several are discovered
 - `webview/diffPanelProvider.ts` — Creates/manages webview panels, handles message passing
 - `highlighter.ts` — Server-side syntax highlighting via highlight.js, splits highlighted HTML across line boundaries
 

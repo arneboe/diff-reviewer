@@ -2,7 +2,7 @@
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
   "description": "Interactive diff review UI for approving or rejecting individual hunks",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {

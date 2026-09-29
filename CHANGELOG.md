@@ -2,6 +2,11 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [1.2.1] — 2026-09-29
+
+### Changed
+- Repositories without any uncommitted changes are no longer shown in the sidebar tree
+
 ## [1.2.0] — 2026-09-29
 
 ### Added

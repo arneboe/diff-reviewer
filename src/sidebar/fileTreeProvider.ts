@@ -76,10 +76,11 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       return isRepoNode(element) ? element.files : [];
     }
     // A single repository keeps the flat list; several get one group each.
+    // Repositories without changes are hidden.
     if (this.repoNodes.length <= 1) {
       return this.files;
     }
-    return this.repoNodes;
+    return this.repoNodes.filter((node) => node.files.length > 0);
   }
 
   private getRepoItem(node: RepoNode): vscode.TreeItem {
@@ -88,24 +89,18 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       (f) => !this.stateManager.isFileResolved(f.repoRoot, diffFilePath(f)),
     ).length;
 
-    const item = new vscode.TreeItem(
-      node.repo.name,
-      count > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None,
-    );
+    const item = new vscode.TreeItem(node.repo.name, vscode.TreeItemCollapsibleState.Expanded);
     const location =
       node.repo.relativePath && node.repo.relativePath !== node.repo.name
         ? node.repo.relativePath
         : '';
-    const summary =
-      count === 0
-        ? 'no changes'
-        : `${count} file${count === 1 ? '' : 's'}, ${pendingFiles} pending`;
+    const summary = `${count} file${count === 1 ? '' : 's'}, ${pendingFiles} pending`;
     item.description = location ? `${location}  ·  ${summary}` : summary;
     item.tooltip = node.repo.root;
-    item.iconPath = new vscode.ThemeIcon(
-      pendingFiles === 0 && count > 0 ? 'check' : 'repo',
-      pendingFiles === 0 && count > 0 ? new vscode.ThemeColor('testing.iconPassed') : undefined,
-    );
+    item.iconPath =
+      pendingFiles === 0
+        ? new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'))
+        : new vscode.ThemeIcon('repo');
     item.contextValue = 'diffRepo';
     item.id = `repo:${node.repo.root}`;
     return item;
