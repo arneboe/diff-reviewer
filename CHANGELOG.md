@@ -2,6 +2,11 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [1.2.2] — 2026-09-29
+
+### Changed
+- Repository, issues, and discussions URLs in `package.json` now point at github.com/arneboe/diff-reviewer
+
 ## [1.2.1] — 2026-09-29
 
 ### Changed

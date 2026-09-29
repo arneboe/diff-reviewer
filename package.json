@@ -2,12 +2,12 @@
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
   "description": "Interactive diff review UI for approving or rejecting individual hunks",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fredsvanelli/diff-reviewer.git"
+    "url": "https://github.com/arneboe/diff-reviewer.git"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -32,9 +32,9 @@
     "theme": "dark"
   },
   "bugs": {
-    "url": "https://github.com/fredsvanelli/diff-reviewer/issues"
+    "url": "https://github.com/arneboe/diff-reviewer/issues"
   },
-  "qna": "https://github.com/fredsvanelli/diff-reviewer/discussions",
+  "qna": "https://github.com/arneboe/diff-reviewer/discussions",
   "activationEvents": [
     "workspaceContains:.git",
     "onStartupFinished"
