@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A VS Code extension for interactive diff review. It shows uncommitted changes (staged + unstaged vs HEAD) in a sidebar file tree and opens per-file webview panels where users can approve or reject individual hunks. Rejecting a hunk reverse-applies it on disk via `git apply -R`; approving marks it as reviewed. All actions are undoable.
+A VS Code extension for interactive diff review. It shows uncommitted changes (staged + unstaged vs HEAD) from every git repository in the workspace in a sidebar file tree and opens per-file webview panels where users can approve or reject individual hunks. Rejecting a hunk reverse-applies it on disk via `git apply -R`; approving marks it as reviewed. All actions are undoable.
 
 ## Commands
 
@@ -26,10 +26,12 @@ Pre-commit hook runs `npm run lint:fix && npm run ts:check`.
 
 **Extension-side modules** (`src/`):
 - `extension.ts` — Activation, command registration, message routing between webview and state
-- `git/gitAdapter.ts` — Shells out to `git` CLI for diffs, file content, and `git apply` (forward/reverse)
+- `git/repoDiscovery.ts` — Finds git repositories for the workspace folders: a folder inside a work tree yields that repo; otherwise subfolders are scanned (depth from `diffReviewer.repoScanDepth`)
+- `git/repoManager.ts` — One `GitAdapter` per discovered repo; aggregates `getDiff()` across repos and resolves the adapter for a `repoRoot`
+- `git/gitAdapter.ts` — Shells out to `git` CLI for diffs, file content, and `git apply` (forward/reverse) within a single repo; stamps `repoRoot` on every `DiffFile`
 - `git/diffParser.ts` — Parses unified diff text into `DiffFile`/`DiffHunk` structures, then `splitHunks()` breaks each hunk into granular sub-hunks (one per contiguous change group) for per-change-group review. Computes content-based hunk IDs (FNV-1a hash) for stable tracking across re-parses
-- `state/stateManager.ts` — Tracks hunk statuses (`pending`/`approved`/`rejected`) by content-based hunk ID (not index), manages undo stack, persists approved statuses to `vscode.Memento`
-- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar file list
+- `state/stateManager.ts` — Tracks hunk statuses (`pending`/`approved`/`rejected`) by content-based hunk ID (not index), keyed per `(repoRoot, filePath)`, manages undo stack, persists approved statuses to `vscode.Memento`
+- `sidebar/fileTreeProvider.ts` — VS Code TreeDataProvider for the sidebar; flat file list for one repo, one expandable node per repo when several are present
 - `webview/diffPanelProvider.ts` — Creates/manages webview panels, handles message passing
 - `highlighter.ts` — Server-side syntax highlighting via highlight.js, splits highlighted HTML across line boundaries
 
@@ -39,6 +41,7 @@ Pre-commit hook runs `npm run lint:fix && npm run ts:check`.
 
 **Key design decisions:**
 - Hunk identity is content-based (FNV-1a hash of changed lines + file path), not index-based. This means approvals survive when hunks shift position after edits
+- Files are identified by `fileKey(repoRoot, filePath)` everywhere (state, panels, webview messages), since the same relative path can exist in several repos
 - Rejecting a hunk modifies the working tree immediately via `git apply -R --unidiff-zero`, then re-parses the diff to update line numbers
 - The webview displays the full file with hunks rendered inline at their line positions, not just isolated diffs
 

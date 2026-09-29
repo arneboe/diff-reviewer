@@ -5,6 +5,8 @@ const vscode = acquireVsCodeApi();
 
 /** @type {string} */
 let currentFilePath = '';
+/** Absolute root of the repo the current file belongs to; echoed back on every message. */
+let currentRepoRoot = '';
 
 /** @type {string[]} */
 let currentHighlightedLines = [];
@@ -30,6 +32,7 @@ window.addEventListener('message', (event) => {
   switch (msg.command) {
     case 'showFile':
       currentFilePath = msg.file.newPath || msg.file.oldPath;
+      currentRepoRoot = msg.file.repoRoot || '';
       currentHighlightedLines = msg.highlightedLines || [];
       renderFile(msg.file, msg.hunkStatuses, msg.fileContent || [], currentHighlightedLines);
       vscode.setState({ file: msg.file, hunkStatuses: msg.hunkStatuses, fileContent: msg.fileContent || [], highlightedLines: currentHighlightedLines });
@@ -83,7 +86,7 @@ function renderFile(file, hunkStatuses, fileContent, highlightedLines) {
   editLink.href = '#';
   editLink.addEventListener('click', (e) => {
     e.preventDefault();
-    vscode.postMessage({ command: 'openInEditor', filePath });
+    vscode.postMessage({ command: 'openInEditor', repoRoot: currentRepoRoot, filePath });
   });
   titleGroup.appendChild(editLink);
 
@@ -294,7 +297,7 @@ function createUndoBadge(filePath, index) {
     badge.classList.remove('undo-hover');
   });
   badge.addEventListener('click', () => {
-    vscode.postMessage({ command: 'undo', filePath, hunkIndex: index });
+    vscode.postMessage({ command: 'undo', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
   });
   return badge;
 }
@@ -347,7 +350,7 @@ function createHunkActions(filePath, index) {
   approveBtn.className = 'btn-approve';
   approveBtn.textContent = 'Approve';
   approveBtn.addEventListener('click', () => {
-    vscode.postMessage({ command: 'approve', filePath, hunkIndex: index });
+    vscode.postMessage({ command: 'approve', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
   });
 
   const rejectBtn = document.createElement('button');
@@ -355,7 +358,7 @@ function createHunkActions(filePath, index) {
   rejectBtn.textContent = 'Reject';
   makeRejectWithConfirm(rejectBtn, 'Reject', () => {
     pendingAutoScroll = true;
-    vscode.postMessage({ command: 'reject', filePath, hunkIndex: index });
+    vscode.postMessage({ command: 'reject', repoRoot: currentRepoRoot, filePath, hunkIndex: index });
   });
 
   actionsEl.appendChild(approveBtn);
@@ -466,7 +469,7 @@ function createFloatingBar(filePath, pendingCount) {
     acceptBtn.textContent = 'Accept file';
     const resetAccept = makeRejectWithConfirm(acceptBtn, 'Accept file', () => {
       pendingAutoScroll = true;
-      vscode.postMessage({ command: 'approveAll', filePath });
+      vscode.postMessage({ command: 'approveAll', repoRoot: currentRepoRoot, filePath });
     }, () => peerRef.reset());
     bar.appendChild(acceptBtn);
 
@@ -475,7 +478,7 @@ function createFloatingBar(filePath, pendingCount) {
     rejectBtn.textContent = 'Reject file';
     peerRef.reset = makeRejectWithConfirm(rejectBtn, 'Reject file', () => {
       pendingAutoScroll = true;
-      vscode.postMessage({ command: 'rejectAll', filePath });
+      vscode.postMessage({ command: 'rejectAll', repoRoot: currentRepoRoot, filePath });
     }, resetAccept);
     bar.appendChild(rejectBtn);
   }

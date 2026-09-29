@@ -17,6 +17,9 @@ export interface DiffHunk {
 }
 
 export interface DiffFile {
+  /** Absolute path of the git repository this file belongs to */
+  repoRoot: string;
+  /** Path relative to repoRoot */
   oldPath: string;
   newPath: string;
   hunks: DiffHunk[];
@@ -30,6 +33,7 @@ export interface DiffFile {
 export type HunkStatus = 'pending' | 'approved' | 'rejected';
 
 export interface HunkState {
+  repoRoot: string;
   filePath: string;
   hunkIndex: number;
   status: HunkStatus;
@@ -37,6 +41,7 @@ export interface HunkState {
 
 export interface UndoEntry {
   type: 'approve' | 'reject';
+  repoRoot: string;
   filePath: string;
   hunkId: string;
   /** For reject undo of tracked files: the forward patch to re-apply via git apply */
@@ -58,11 +63,36 @@ export type ExtToWebviewMessage =
   | { command: 'clear' };
 
 // Webview → Extension messages
+// Every file-scoped message carries repoRoot so the extension can route it to
+// the right repository when several are open.
 export type WebviewToExtMessage =
   | { command: 'ready' }
-  | { command: 'approve'; filePath: string; hunkIndex: number }
-  | { command: 'reject'; filePath: string; hunkIndex: number }
-  | { command: 'approveAll'; filePath: string }
-  | { command: 'rejectAll'; filePath: string }
-  | { command: 'undo'; filePath: string; hunkIndex: number }
-  | { command: 'openInEditor'; filePath: string };
+  | { command: 'approve'; repoRoot: string; filePath: string; hunkIndex: number }
+  | { command: 'reject'; repoRoot: string; filePath: string; hunkIndex: number }
+  | { command: 'approveAll'; repoRoot: string; filePath: string }
+  | { command: 'rejectAll'; repoRoot: string; filePath: string }
+  | { command: 'undo'; repoRoot: string; filePath: string; hunkIndex: number }
+  | { command: 'openInEditor'; repoRoot: string; filePath: string };
+
+/** Identifies one file within one repository. */
+export interface FileRef {
+  repoRoot: string;
+  filePath: string;
+}
+
+/** Path of a DiffFile relative to its repo root. */
+export function diffFilePath(file: DiffFile): string {
+  return file.newPath || file.oldPath;
+}
+
+/**
+ * Composite key uniquely identifying a file across repositories.
+ * NUL cannot occur in paths, so it is a safe separator.
+ */
+export function fileKey(repoRoot: string, filePath: string): string {
+  return `${repoRoot}\0${filePath}`;
+}
+
+export function fileKeyOf(file: DiffFile): string {
+  return fileKey(file.repoRoot, diffFilePath(file));
+}

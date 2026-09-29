@@ -7,6 +7,7 @@
 ## Features
 
 - **Sidebar file tree** - All files with uncommitted changes (staged + unstaged vs HEAD) listed in one place, including untracked new files
+- **Multi-repository workspaces** - Open a parent folder that contains several git repositories (or a multi-root workspace) and every repository's changes are aggregated, grouped under one tree node per repository
 - **Inline diff view** - Full file content with change hunks highlighted at their exact line positions - no side-by-side pane switching
 - **Per-hunk approve / reject** - Review each change group independently; rejecting a hunk reverse-applies it on disk immediately
 - **Approve or reject an entire file** - One-click buttons in the sidebar context menu to bulk-approve or bulk-reject all hunks in a file
@@ -19,11 +20,11 @@
 
 - **Git** must be installed and available on your `PATH`
 - **VS Code** v1.85 or later
-- Open a folder that contains a Git repository
+- Open a folder that is a Git repository, or a folder whose subfolders contain Git repositories
 
 ## Getting Started
 
-1. Open a Git repository in VS Code
+1. Open a Git repository in VS Code (or a folder containing several)
 2. Click the **Diff Reviewer** icon in the Activity Bar (left sidebar)
 3. The **Modified Files** panel lists all files with uncommitted changes
 4. Click any file to open its inline diff view
@@ -41,6 +42,10 @@ Click a file in the **Modified Files** panel to open the diff view. Each changed
 ### Approving or rejecting an entire file
 
 You can **Approve** (✓) or **Reject** (✗) an entire file directly from the sidebar. This applies the action to every pending hunk in the file at once.
+
+### Working with several repositories
+
+If the opened folder is not a Git repository itself, Diff Reviewer searches its subfolders for repositories (skipping hidden folders and `node_modules`). Each repository found gets its own expandable node in the **Modified Files** panel with the changed files listed below it. The search depth is controlled by the `diffReviewer.repoScanDepth` setting (default: 10 levels).
 
 ### Undoing an approval
 

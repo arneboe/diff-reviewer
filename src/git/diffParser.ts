@@ -17,6 +17,8 @@ export function parseDiff(diffText: string): DiffFile[] {
     }
 
     const file: DiffFile = {
+      // The parser has no repository context; GitAdapter stamps the real root.
+      repoRoot: '',
       oldPath: '',
       newPath: '',
       hunks: [],

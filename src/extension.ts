@@ -1,37 +1,54 @@
 import { join } from 'path';
 import * as vscode from 'vscode';
-import { GitAdapter } from './git/gitAdapter';
+import { RepoManager } from './git/repoManager';
 import { FileTreeProvider } from './sidebar/fileTreeProvider';
 import { DiffPanelProvider } from './webview/diffPanelProvider';
 import { StateManager } from './state/stateManager';
-import { DiffFile, HunkStatus, WebviewToExtMessage } from './types';
+import { DiffFile, FileRef, HunkStatus, WebviewToExtMessage, diffFilePath } from './types';
 import { highlightFileContent } from './highlighter';
 
-let git: GitAdapter;
+const CONFIG_SECTION = 'diffReviewer';
+const DEFAULT_SCAN_DEPTH = 10;
+
+let repos: RepoManager;
 let fileTreeProvider: FileTreeProvider;
 let diffPanelProvider: DiffPanelProvider;
 let stateManager: StateManager;
 
+function getScanDepth(): number {
+  const value = vscode.workspace
+    .getConfiguration(CONFIG_SECTION)
+    .get<number>('repoScanDepth', DEFAULT_SCAN_DEPTH);
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : DEFAULT_SCAN_DEPTH;
+}
+
+function workspaceFolderPaths(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+}
+
 /** Read file content + highlight, then send to webview. */
 async function getFileData(
-  filePath: string,
+  file: DiffFile,
 ): Promise<{ fileContent: string[]; highlightedLines: string[] }> {
-  const fileContent = await git.getFileContent(filePath);
+  const filePath = diffFilePath(file);
+  const fileContent = await repos.getAdapter(file.repoRoot).getFileContent(filePath);
   const highlightedLines = highlightFileContent(filePath, fileContent);
   return { fileContent, highlightedLines };
 }
 
+function refOf(file: DiffFile): FileRef {
+  return { repoRoot: file.repoRoot, filePath: diffFilePath(file) };
+}
+
 export async function activate(context: vscode.ExtensionContext) {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
+  if (!vscode.workspace.workspaceFolders?.length) {
     vscode.window.showErrorMessage('Diff Reviewer: No workspace folder open.');
     return;
   }
 
-  git = new GitAdapter(workspaceFolder.uri.fsPath);
-  await git.init();
-  stateManager = new StateManager(git, context.workspaceState);
-  fileTreeProvider = new FileTreeProvider(git, stateManager);
+  repos = new RepoManager(workspaceFolderPaths(), getScanDepth());
+  stateManager = new StateManager(repos, context.workspaceState);
+  fileTreeProvider = new FileTreeProvider(repos, stateManager);
 
   // Sidebar tree view
   const treeView = vscode.window.createTreeView('diffReviewer.fileTree', {
@@ -39,10 +56,15 @@ export async function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(treeView);
 
-  // Update badge when tree data changes
+  // Update badge and welcome-view context when tree data changes
   fileTreeProvider.onDidChangeTreeData(() => {
     const count = fileTreeProvider.getFiles().length;
     treeView.badge = count > 0 ? { value: count, tooltip: `${count} modified files` } : undefined;
+    vscode.commands.executeCommand(
+      'setContext',
+      'diffReviewer.noRepos',
+      fileTreeProvider.getRepoCount() === 0,
+    );
   });
 
   // Webview panel provider
@@ -61,31 +83,26 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand('diffReviewer.openFile', async (file: DiffFile) => {
-      const filePath = file.newPath || file.oldPath;
       const statuses = stateManager.syncStatuses(file);
-      const { fileContent, highlightedLines } = await getFileData(filePath);
+      const { fileContent, highlightedLines } = await getFileData(file);
       diffPanelProvider.showFile(file, statuses, fileContent, highlightedLines);
     }),
 
     vscode.commands.registerCommand('diffReviewer.approveFile', async (file: DiffFile) => {
-      const filePath = file.newPath || file.oldPath;
       stateManager.syncStatuses(file);
-      stateManager.approveAll(filePath, file);
+      stateManager.approveAll(file);
       fileTreeProvider.refresh();
-      const statuses = stateManager.getStatusArray(file);
-      const { fileContent, highlightedLines } = await getFileData(filePath);
-      diffPanelProvider.refreshFile(file, statuses, fileContent, highlightedLines);
+      await sendRefresh(file);
     }),
 
     vscode.commands.registerCommand('diffReviewer.rejectFile', async (file: DiffFile) => {
-      const filePath = file.newPath || file.oldPath;
       stateManager.syncStatuses(file);
       try {
-        const updatedFile = await stateManager.rejectAll(filePath, file);
+        const updatedFile = await stateManager.rejectAll(file);
         if (updatedFile) {
-          await sendRefresh(filePath, updatedFile);
+          await sendRefresh(updatedFile);
         } else {
-          diffPanelProvider.closeFile(filePath);
+          diffPanelProvider.closeFile(refOf(file));
         }
         await fileTreeProvider.refresh();
       } catch (err: unknown) {
@@ -102,17 +119,30 @@ export async function activate(context: vscode.ExtensionContext) {
       }
 
       if (result.undoneType === 'reject') {
-        await refreshFilePanel(result.filePath);
+        await refreshFilePanel(result);
       }
 
       await fileTreeProvider.refresh();
 
       if (result.undoneType === 'approve') {
-        const files = fileTreeProvider.getFiles();
-        const file = files.find((f) => (f.newPath || f.oldPath) === result.filePath);
+        const file = fileTreeProvider.findFile(result.repoRoot, result.filePath);
         if (file) {
-          await sendRefresh(result.filePath, file);
+          await sendRefresh(file);
         }
+      }
+    }),
+  );
+
+  // Re-discover repos when the workspace or the scan depth changes
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(async () => {
+      repos.setWorkspaceFolders(workspaceFolderPaths());
+      await fileTreeProvider.refresh();
+    }),
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (e.affectsConfiguration(`${CONFIG_SECTION}.repoScanDepth`)) {
+        repos.setMaxDepth(getScanDepth());
+        await fileTreeProvider.refresh();
       }
     }),
   );
@@ -140,23 +170,18 @@ export async function activate(context: vscode.ExtensionContext) {
   fileTreeProvider.refresh();
 }
 
-async function handlePanelFocus(filePath: string): Promise<void> {
+async function handlePanelFocus(ref: FileRef): Promise<void> {
   await fileTreeProvider.refresh();
-  const files = fileTreeProvider.getFiles();
-  const file = files.find((f) => (f.newPath || f.oldPath) === filePath);
+  const file = fileTreeProvider.findFile(ref.repoRoot, ref.filePath);
   if (file) {
     const statuses = stateManager.syncStatuses(file);
-    await sendRefresh(filePath, file, statuses);
+    await sendRefresh(file, statuses);
   }
 }
 
-async function sendRefresh(
-  filePath: string,
-  file: DiffFile,
-  statuses?: HunkStatus[],
-): Promise<void> {
+async function sendRefresh(file: DiffFile, statuses?: HunkStatus[]): Promise<void> {
   const s = statuses || stateManager.getStatusArray(file);
-  const { fileContent, highlightedLines } = await getFileData(filePath);
+  const { fileContent, highlightedLines } = await getFileData(file);
   diffPanelProvider.refreshFile(file, s, fileContent, highlightedLines);
 }
 
@@ -166,28 +191,26 @@ async function handleWebviewMessage(msg: WebviewToExtMessage): Promise<void> {
   }
 
   if (msg.command === 'openInEditor') {
-    const fileUri = vscode.Uri.file(join(git.getRepoRoot(), msg.filePath));
+    const fileUri = vscode.Uri.file(join(msg.repoRoot, msg.filePath));
     await vscode.window.showTextDocument(fileUri, { preview: false });
     return;
   }
 
+  const file = fileTreeProvider.findFile(msg.repoRoot, msg.filePath);
+
   if (msg.command === 'approve') {
-    const files = fileTreeProvider.getFiles();
-    const file = files.find((f) => (f.newPath || f.oldPath) === msg.filePath);
     const hunkId = file?.hunks[msg.hunkIndex]?.id;
-    if (!hunkId) {
+    if (!file || !hunkId) {
       return;
     }
-    stateManager.approve(msg.filePath, hunkId);
-    diffPanelProvider.updateHunk(msg.filePath, msg.hunkIndex, 'approved');
+    stateManager.approve(file, hunkId);
+    diffPanelProvider.updateHunk(msg, msg.hunkIndex, 'approved');
     fileTreeProvider.refresh();
     return;
   }
 
   if (msg.command === 'reject') {
     try {
-      const files = fileTreeProvider.getFiles();
-      const file = files.find((f) => (f.newPath || f.oldPath) === msg.filePath);
       if (!file) {
         vscode.window.showErrorMessage(`File not found in diff: ${msg.filePath}`);
         return;
@@ -198,12 +221,12 @@ async function handleWebviewMessage(msg: WebviewToExtMessage): Promise<void> {
         vscode.window.showErrorMessage(`Hunk not found at index ${msg.hunkIndex}`);
         return;
       }
-      const updatedFile = await stateManager.reject(msg.filePath, hunkId, file);
+      const updatedFile = await stateManager.reject(file, hunkId);
 
       if (updatedFile) {
-        await sendRefresh(msg.filePath, updatedFile);
+        await sendRefresh(updatedFile);
       } else {
-        diffPanelProvider.closeFile(msg.filePath);
+        diffPanelProvider.closeFile(msg);
       }
 
       await fileTreeProvider.refresh();
@@ -215,44 +238,38 @@ async function handleWebviewMessage(msg: WebviewToExtMessage): Promise<void> {
   }
 
   if (msg.command === 'approveAll') {
-    const files = fileTreeProvider.getFiles();
-    const file = files.find((f) => (f.newPath || f.oldPath) === msg.filePath);
     if (!file) {
       return;
     }
 
-    stateManager.approveAll(msg.filePath, file);
-    await sendRefresh(msg.filePath, file);
+    stateManager.approveAll(file);
+    await sendRefresh(file);
     fileTreeProvider.refresh();
     return;
   }
 
   if (msg.command === 'undo') {
-    const files = fileTreeProvider.getFiles();
-    const file = files.find((f) => (f.newPath || f.oldPath) === msg.filePath);
     const hunkId = file?.hunks[msg.hunkIndex]?.id;
-    if (!hunkId) {
+    if (!file || !hunkId) {
       return;
     }
-    stateManager.undoApprove(msg.filePath, hunkId);
-    diffPanelProvider.updateHunk(msg.filePath, msg.hunkIndex, 'pending');
+    stateManager.undoApprove(file, hunkId);
+    diffPanelProvider.updateHunk(msg, msg.hunkIndex, 'pending');
     fileTreeProvider.refresh();
     return;
   }
 
   if (msg.command === 'rejectAll') {
-    const files = fileTreeProvider.getFiles();
-    const file = files.find((f) => (f.newPath || f.oldPath) === msg.filePath);
     if (!file) {
       return;
     }
 
     try {
-      const updatedFile = await stateManager.rejectAll(msg.filePath, file);
+      const updatedFile = await stateManager.rejectAll(file);
       if (updatedFile) {
-        await sendRefresh(msg.filePath, updatedFile);
+        await sendRefresh(updatedFile);
       } else {
-        diffPanelProvider.closeFile(msg.filePath);
+        diffPanelProvider.closeFile(msg);
       }
       await fileTreeProvider.refresh();
     } catch (err: unknown) {
@@ -262,15 +279,14 @@ async function handleWebviewMessage(msg: WebviewToExtMessage): Promise<void> {
   }
 }
 
-async function refreshFilePanel(filePath: string): Promise<void> {
+async function refreshFilePanel(ref: FileRef): Promise<void> {
   await fileTreeProvider.refresh();
-  const files = fileTreeProvider.getFiles();
-  const file = files.find((f) => (f.newPath || f.oldPath) === filePath);
+  const file = fileTreeProvider.findFile(ref.repoRoot, ref.filePath);
   if (file) {
     const statuses = stateManager.syncStatuses(file);
-    await sendRefresh(filePath, file, statuses);
+    await sendRefresh(file, statuses);
   } else {
-    diffPanelProvider.closeFile(filePath);
+    diffPanelProvider.closeFile(ref);
   }
 }
 

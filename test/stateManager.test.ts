@@ -1,9 +1,12 @@
 import * as assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import type * as vscode from 'vscode';
-import { GitAdapter } from '../src/git/gitAdapter';
+import { GitResolver } from '../src/git/repoManager';
 import { StateManager } from '../src/state/stateManager';
 import { DiffFile, DiffHunk } from '../src/types';
+
+const REPO = '/work/repo-a';
+const OTHER_REPO = '/work/repo-b';
 
 // Minimal mock of GitAdapter
 class MockGitAdapter {
@@ -26,6 +29,18 @@ class MockGitAdapter {
   async getDiff(): Promise<DiffFile[]> {
     return this.nextFileDiff;
   }
+}
+
+/** Resolver handing the same mock adapter to every repo, recording which roots were asked for. */
+function resolverFor(adapter: MockGitAdapter): GitResolver & { requestedRoots: string[] } {
+  const requestedRoots: string[] = [];
+  return {
+    requestedRoots,
+    getAdapter(repoRoot: string) {
+      requestedRoots.push(repoRoot);
+      return adapter as unknown as ReturnType<GitResolver['getAdapter']>;
+    },
+  };
 }
 
 // Mock vscode.Memento for persistence tests
@@ -62,8 +77,9 @@ function makeHunk(overrides: Partial<DiffHunk> = {}): DiffHunk {
   };
 }
 
-function makeFile(hunks: DiffHunk[] = [makeHunk()]): DiffFile {
+function makeFile(hunks: DiffHunk[] = [makeHunk()], repoRoot = REPO): DiffFile {
   return {
+    repoRoot,
     oldPath: 'test.txt',
     newPath: 'test.txt',
     hunks,
@@ -74,12 +90,14 @@ function makeFile(hunks: DiffHunk[] = [makeHunk()]): DiffFile {
 
 describe('StateManager', () => {
   let git: MockGitAdapter;
+  let resolver: ReturnType<typeof resolverFor>;
   let state: StateManager;
 
   beforeEach(() => {
     git = new MockGitAdapter();
+    resolver = resolverFor(git);
     hunkCounter = 0;
-    state = new StateManager(git as unknown as GitAdapter);
+    state = new StateManager(resolver);
   });
 
   describe('syncStatuses', () => {
@@ -94,7 +112,7 @@ describe('StateManager', () => {
       const hunk2 = makeHunk({ id: 'bbb' });
       const file = makeFile([hunk1, hunk2]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'aaa');
+      state.approve(file, 'aaa');
 
       const statuses = state.syncStatuses(file);
       assert.equal(statuses[0], 'approved');
@@ -106,8 +124,8 @@ describe('StateManager', () => {
       const hunk2 = makeHunk({ id: 'bbb' });
       const file = makeFile([hunk1, hunk2]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'aaa');
-      state.approve('test.txt', 'bbb');
+      state.approve(file, 'aaa');
+      state.approve(file, 'bbb');
 
       // Re-sync with only hunk2 remaining
       const newFile = makeFile([hunk2]);
@@ -121,7 +139,7 @@ describe('StateManager', () => {
       const hunk = makeHunk({ id: 'test-id' });
       const file = makeFile([hunk]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'test-id');
+      state.approve(file, 'test-id');
 
       const statuses = state.getStatusArray(file);
       assert.equal(statuses[0], 'approved');
@@ -130,7 +148,7 @@ describe('StateManager', () => {
     it('ignores unknown hunk ID', () => {
       const file = makeFile();
       state.syncStatuses(file);
-      state.approve('test.txt', 'nonexistent'); // Should not throw
+      state.approve(file, 'nonexistent'); // Should not throw
     });
   });
 
@@ -142,7 +160,7 @@ describe('StateManager', () => {
 
       git.nextFileDiff = [];
 
-      await state.reject('test.txt', 'reject-me', file);
+      await state.reject(file, 'reject-me');
 
       assert.equal(git.appliedReverse.length, 1);
       const patch = git.appliedReverse[0];
@@ -157,7 +175,7 @@ describe('StateManager', () => {
       state.syncStatuses(file);
       git.nextFileDiff = [];
 
-      const result = await state.reject('test.txt', 'only-one', file);
+      const result = await state.reject(file, 'only-one');
       assert.equal(result, null);
     });
 
@@ -170,7 +188,7 @@ describe('StateManager', () => {
       const remainingFile = makeFile([makeHunk({ id: 'h2-fresh' })]);
       git.nextFileDiff = [remainingFile];
 
-      const result = await state.reject('test.txt', 'h1', file);
+      const result = await state.reject(file, 'h1');
       assert.ok(result);
       assert.equal(result!.hunks.length, 1);
     });
@@ -186,7 +204,7 @@ describe('StateManager', () => {
       const hunk = makeHunk({ id: 'undo-me' });
       const file = makeFile([hunk]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'undo-me');
+      state.approve(file, 'undo-me');
 
       const result = await state.undo();
       assert.ok(result);
@@ -200,7 +218,7 @@ describe('StateManager', () => {
       state.syncStatuses(file);
       git.nextFileDiff = [];
 
-      await state.reject('test.txt', 'reject-then-undo', file);
+      await state.reject(file, 'reject-then-undo');
 
       const result = await state.undo();
       assert.ok(result);
@@ -213,19 +231,19 @@ describe('StateManager', () => {
     it('returns false when hunks are pending', () => {
       const file = makeFile([makeHunk({ id: 'a' }), makeHunk({ id: 'b' })]);
       state.syncStatuses(file);
-      assert.equal(state.isFileResolved('test.txt'), false);
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
     });
 
     it('returns true when all hunks are approved', () => {
       const file = makeFile([makeHunk({ id: 'a' }), makeHunk({ id: 'b' })]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'a');
-      state.approve('test.txt', 'b');
-      assert.equal(state.isFileResolved('test.txt'), true);
+      state.approve(file, 'a');
+      state.approve(file, 'b');
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
     });
 
     it('returns false for unknown file', () => {
-      assert.equal(state.isFileResolved('unknown.txt'), false);
+      assert.equal(state.isFileResolved(REPO, 'unknown.txt'), false);
     });
   });
 
@@ -234,19 +252,19 @@ describe('StateManager', () => {
       const hunks = [makeHunk({ id: 'x' }), makeHunk({ id: 'y' }), makeHunk({ id: 'z' })];
       const file = makeFile(hunks);
       state.syncStatuses(file);
-      state.approveAll('test.txt', file);
+      state.approveAll(file);
 
       const statuses = state.getStatusArray(file);
       assert.deepEqual(statuses, ['approved', 'approved', 'approved']);
-      assert.equal(state.isFileResolved('test.txt'), true);
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
     });
 
     it('skips already approved hunks', () => {
       const hunks = [makeHunk({ id: 'x' }), makeHunk({ id: 'y' })];
       const file = makeFile(hunks);
       state.syncStatuses(file);
-      state.approve('test.txt', 'x');
-      state.approveAll('test.txt', file);
+      state.approve(file, 'x');
+      state.approveAll(file);
 
       const statuses = state.getStatusArray(file);
       assert.deepEqual(statuses, ['approved', 'approved']);
@@ -270,7 +288,7 @@ describe('StateManager', () => {
         return [oneHunkFile];
       };
 
-      const result = await state.rejectAll('test.txt', file);
+      const result = await state.rejectAll(file);
       assert.equal(result, null);
       assert.equal(git.appliedReverse.length, 2);
     });
@@ -281,7 +299,7 @@ describe('StateManager', () => {
       const hunk = makeHunk({ id: 'c1' });
       const file = makeFile([hunk]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'c1');
+      state.approve(file, 'c1');
 
       state.clear();
       assert.deepEqual(state.getStatusArray(file), ['pending']);
@@ -299,7 +317,7 @@ describe('StateManager', () => {
       state.syncStatuses(file1);
 
       // Approve hunk B (index 1)
-      state.approve('test.txt', 'hunk-B');
+      state.approve(file1, 'hunk-B');
 
       // After new edits, a new hunk appears at index 0, pushing hunk-B to index 2
       const newHunk = makeHunk({ id: 'hunk-NEW' });
@@ -316,42 +334,30 @@ describe('StateManager', () => {
   describe('persistence', () => {
     it('persists and restores approved statuses', () => {
       const memento = new MockMemento();
-      const state1 = new StateManager(
-        git as unknown as GitAdapter,
-        memento as unknown as vscode.Memento,
-      );
+      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
 
       const hunk = makeHunk({ id: 'persist-me' });
       const file = makeFile([hunk]);
       state1.syncStatuses(file);
-      state1.approve('test.txt', 'persist-me');
+      state1.approve(file, 'persist-me');
 
       // Create a new StateManager reading from the same memento (simulates restart)
-      const state2 = new StateManager(
-        git as unknown as GitAdapter,
-        memento as unknown as vscode.Memento,
-      );
+      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
       const statuses = state2.getStatusArray(file);
       assert.equal(statuses[0], 'approved');
     });
 
     it('does not persist pending statuses', () => {
       const memento = new MockMemento();
-      const state1 = new StateManager(
-        git as unknown as GitAdapter,
-        memento as unknown as vscode.Memento,
-      );
+      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
 
       const hunk = makeHunk({ id: 'pending-hunk' });
       const file = makeFile([hunk]);
       state1.syncStatuses(file);
 
       // New StateManager should have no data for this file
-      const state2 = new StateManager(
-        git as unknown as GitAdapter,
-        memento as unknown as vscode.Memento,
-      );
-      assert.deepEqual(state2.getStatuses('test.txt'), []);
+      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
+      assert.deepEqual(state2.getStatuses(REPO, 'test.txt'), []);
     });
   });
 
@@ -360,22 +366,83 @@ describe('StateManager', () => {
       const hunk = makeHunk({ id: 'prune-test' });
       const file = makeFile([hunk]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'prune-test');
+      state.approve(file, 'prune-test');
 
       // After commit, file is gone from diff
       state.pruneCommittedFiles([]);
-      assert.equal(state.isFileResolved('test.txt'), false);
-      assert.deepEqual(state.getStatuses('test.txt'), []);
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
+      assert.deepEqual(state.getStatuses(REPO, 'test.txt'), []);
     });
 
     it('keeps files still in diff', () => {
       const hunk = makeHunk({ id: 'keep-test' });
       const file = makeFile([hunk]);
       state.syncStatuses(file);
-      state.approve('test.txt', 'keep-test');
+      state.approve(file, 'keep-test');
 
       state.pruneCommittedFiles([file]);
-      assert.equal(state.isFileResolved('test.txt'), true);
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
+    });
+  });
+
+  describe('multiple repositories', () => {
+    it('keeps statuses separate for the same path in different repos', () => {
+      const fileA = makeFile([makeHunk({ id: 'same-id' })], REPO);
+      const fileB = makeFile([makeHunk({ id: 'same-id' })], OTHER_REPO);
+      state.syncStatuses(fileA);
+      state.syncStatuses(fileB);
+
+      state.approve(fileA, 'same-id');
+
+      assert.deepEqual(state.getStatusArray(fileA), ['approved']);
+      assert.deepEqual(state.getStatusArray(fileB), ['pending']);
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), true);
+      assert.equal(state.isFileResolved(OTHER_REPO, 'test.txt'), false);
+    });
+
+    it("routes reject and undo to the adapter of the file's repo", async () => {
+      const fileB = makeFile([makeHunk({ id: 'b1' })], OTHER_REPO);
+      state.syncStatuses(fileB);
+      git.nextFileDiff = [];
+
+      await state.reject(fileB, 'b1');
+      assert.deepEqual(resolver.requestedRoots, [OTHER_REPO]);
+
+      const result = await state.undo();
+      assert.ok(result);
+      assert.equal(result!.repoRoot, OTHER_REPO);
+      assert.equal(result!.filePath, 'test.txt');
+      assert.deepEqual(resolver.requestedRoots, [OTHER_REPO, OTHER_REPO]);
+      assert.equal(git.appliedForward.length, 1);
+    });
+
+    it('prunes only files missing from the aggregated diff', () => {
+      const fileA = makeFile([makeHunk({ id: 'a1' })], REPO);
+      const fileB = makeFile([makeHunk({ id: 'b1' })], OTHER_REPO);
+      state.syncStatuses(fileA);
+      state.syncStatuses(fileB);
+      state.approve(fileA, 'a1');
+      state.approve(fileB, 'b1');
+
+      state.pruneCommittedFiles([fileB]);
+
+      assert.equal(state.isFileResolved(REPO, 'test.txt'), false);
+      assert.equal(state.isFileResolved(OTHER_REPO, 'test.txt'), true);
+    });
+
+    it('persists per repo and drops legacy path-only entries', () => {
+      const memento = new MockMemento();
+      // Simulate data written by a version that keyed by bare path
+      memento.update('diffReviewer.hunkStatuses', { 'test.txt': { legacy: 'approved' } });
+
+      const state1 = new StateManager(resolver, memento as unknown as vscode.Memento);
+      const fileB = makeFile([makeHunk({ id: 'p1' })], OTHER_REPO);
+      state1.syncStatuses(fileB);
+      state1.approve(fileB, 'p1');
+
+      const state2 = new StateManager(resolver, memento as unknown as vscode.Memento);
+      assert.deepEqual(state2.getStatuses(OTHER_REPO, 'test.txt'), ['approved']);
+      assert.deepEqual(state2.getStatuses(REPO, 'test.txt'), []);
     });
   });
 });

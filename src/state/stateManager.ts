@@ -1,16 +1,24 @@
 import * as vscode from 'vscode';
-import { DiffFile, DiffHunk, HunkStatus, UndoEntry } from '../types';
-import { GitAdapter } from '../git/gitAdapter';
+import {
+  DiffFile,
+  DiffHunk,
+  HunkStatus,
+  UndoEntry,
+  diffFilePath,
+  fileKey,
+  fileKeyOf,
+} from '../types';
+import { GitResolver } from '../git/repoManager';
 
 const STORAGE_KEY = 'diffReviewer.hunkStatuses';
 
 export class StateManager {
-  /** filePath → Map<hunkId, HunkStatus> */
+  /** fileKey(repoRoot, filePath) → Map<hunkId, HunkStatus> */
   private statuses = new Map<string, Map<string, HunkStatus>>();
   private undoStack: UndoEntry[] = [];
 
   constructor(
-    private git: GitAdapter,
+    private git: GitResolver,
     private storage?: vscode.Memento,
   ) {
     if (this.storage) {
@@ -24,7 +32,7 @@ export class StateManager {
    * Stale IDs (hunks no longer in diff) are dropped.
    */
   syncStatuses(file: DiffFile): HunkStatus[] {
-    const path = file.newPath || file.oldPath;
+    const path = fileKeyOf(file);
     const existing = this.statuses.get(path);
 
     if (!existing || existing.size === 0) {
@@ -56,8 +64,7 @@ export class StateManager {
    * Get statuses as an ordered array matching file.hunks order.
    */
   getStatusArray(file: DiffFile): HunkStatus[] {
-    const path = file.newPath || file.oldPath;
-    const map = this.statuses.get(path);
+    const map = this.statuses.get(fileKeyOf(file));
     if (!map) {
       return file.hunks.map(() => 'pending');
     }
@@ -65,10 +72,10 @@ export class StateManager {
   }
 
   /**
-   * @deprecated Use getStatusArray(file) instead. Kept for undo flow where file may not be available.
+   * Raw stored statuses for a file, in insertion order. Mainly for tests.
    */
-  getStatuses(filePath: string): HunkStatus[] {
-    const map = this.statuses.get(filePath);
+  getStatuses(repoRoot: string, filePath: string): HunkStatus[] {
+    const map = this.statuses.get(fileKey(repoRoot, filePath));
     if (!map) {
       return [];
     }
@@ -78,8 +85,8 @@ export class StateManager {
   /**
    * Check if all hunks in a file are resolved (all approved).
    */
-  isFileResolved(filePath: string): boolean {
-    const map = this.statuses.get(filePath);
+  isFileResolved(repoRoot: string, filePath: string): boolean {
+    const map = this.statuses.get(fileKey(repoRoot, filePath));
     if (!map || map.size === 0) {
       return false;
     }
@@ -94,28 +101,39 @@ export class StateManager {
   /**
    * Mark a hunk as approved by hunkId.
    */
-  approve(filePath: string, hunkId: string): void {
-    const map = this.statuses.get(filePath);
+  approve(file: DiffFile, hunkId: string): void {
+    const map = this.statuses.get(fileKeyOf(file));
     if (!map || !map.has(hunkId)) {
       return;
     }
     map.set(hunkId, 'approved');
-    this.undoStack.push({ type: 'approve', filePath, hunkId });
+    this.undoStack.push({
+      type: 'approve',
+      repoRoot: file.repoRoot,
+      filePath: diffFilePath(file),
+      hunkId,
+    });
     this.persist();
   }
 
   /**
    * Approve all pending hunks in a file.
    */
-  approveAll(filePath: string, file: DiffFile): void {
-    const map = this.statuses.get(filePath);
+  approveAll(file: DiffFile): void {
+    const map = this.statuses.get(fileKeyOf(file));
     if (!map) {
       return;
     }
+    const filePath = diffFilePath(file);
     for (const hunk of file.hunks) {
       if (hunk.id && map.get(hunk.id) === 'pending') {
         map.set(hunk.id, 'approved');
-        this.undoStack.push({ type: 'approve', filePath, hunkId: hunk.id });
+        this.undoStack.push({
+          type: 'approve',
+          repoRoot: file.repoRoot,
+          filePath,
+          hunkId: hunk.id,
+        });
       }
     }
     this.persist();
@@ -124,11 +142,12 @@ export class StateManager {
   /**
    * Reject all pending hunks in a file, one at a time (re-parsing after each).
    */
-  async rejectAll(filePath: string, file: DiffFile): Promise<DiffFile | null> {
+  async rejectAll(file: DiffFile): Promise<DiffFile | null> {
     let currentFile: DiffFile | null = file;
+    const key = fileKeyOf(file);
 
     while (currentFile) {
-      const map = this.statuses.get(filePath);
+      const map = this.statuses.get(key);
       if (!map) {
         break;
       }
@@ -145,7 +164,7 @@ export class StateManager {
         break;
       }
 
-      currentFile = await this.reject(filePath, pendingHunkId, currentFile);
+      currentFile = await this.reject(currentFile, pendingHunkId);
     }
 
     return currentFile;
@@ -155,16 +174,21 @@ export class StateManager {
    * Reject a hunk: reverse-apply it on disk via git apply -R.
    * Returns the updated DiffFile after re-parsing.
    */
-  async reject(filePath: string, hunkId: string, file: DiffFile): Promise<DiffFile | null> {
+  async reject(file: DiffFile, hunkId: string): Promise<DiffFile | null> {
     const hunk = file.hunks.find((h) => h.id === hunkId);
     if (!hunk) {
       return null;
     }
 
+    const filePath = diffFilePath(file);
+    const key = fileKeyOf(file);
+    const git = this.git.getAdapter(file.repoRoot);
+
     if (file.isUntracked) {
-      await this.git.rejectUntrackedHunk(filePath, hunk);
+      await git.rejectUntrackedHunk(filePath, hunk);
       this.undoStack.push({
         type: 'reject',
+        repoRoot: file.repoRoot,
         filePath,
         hunkId,
         untrackedInsert: {
@@ -174,19 +198,25 @@ export class StateManager {
       });
     } else {
       const patch = buildPatch(file, hunk);
-      await this.git.applyReverse(patch);
-      this.undoStack.push({ type: 'reject', filePath, hunkId, forwardPatch: patch });
+      await git.applyReverse(patch);
+      this.undoStack.push({
+        type: 'reject',
+        repoRoot: file.repoRoot,
+        filePath,
+        hunkId,
+        forwardPatch: patch,
+      });
     }
 
-    const map = this.statuses.get(filePath);
+    const map = this.statuses.get(key);
     if (map) {
       map.delete(hunkId);
     }
 
     // Re-parse the file diff to get updated line numbers
-    const freshFiles = await this.git.getFileDiff(filePath);
+    const freshFiles = await git.getFileDiff(filePath);
     if (freshFiles.length === 0) {
-      this.statuses.delete(filePath);
+      this.statuses.delete(key);
       this.persist();
       return null;
     }
@@ -199,14 +229,20 @@ export class StateManager {
   /**
    * Undo a specific approval (reset to pending).
    */
-  undoApprove(filePath: string, hunkId: string): void {
-    const map = this.statuses.get(filePath);
+  undoApprove(file: DiffFile, hunkId: string): void {
+    const map = this.statuses.get(fileKeyOf(file));
+    const filePath = diffFilePath(file);
     if (map && map.get(hunkId) === 'approved') {
       map.set(hunkId, 'pending');
       // Remove matching undo entry from the stack
       for (let i = this.undoStack.length - 1; i >= 0; i--) {
         const e = this.undoStack[i];
-        if (e.type === 'approve' && e.filePath === filePath && e.hunkId === hunkId) {
+        if (
+          e.type === 'approve' &&
+          e.repoRoot === file.repoRoot &&
+          e.filePath === filePath &&
+          e.hunkId === hunkId
+        ) {
           this.undoStack.splice(i, 1);
           break;
         }
@@ -216,24 +252,29 @@ export class StateManager {
   }
 
   /**
-   * Undo the last action. Returns the affected filePath or null if stack is empty.
+   * Undo the last action. Returns the affected file or null if stack is empty.
    */
-  async undo(): Promise<{ filePath: string; undoneType: 'approve' | 'reject' } | null> {
+  async undo(): Promise<{
+    repoRoot: string;
+    filePath: string;
+    undoneType: 'approve' | 'reject';
+  } | null> {
     const entry = this.undoStack.pop();
     if (!entry) {
       return null;
     }
 
     if (entry.type === 'approve') {
-      const map = this.statuses.get(entry.filePath);
+      const map = this.statuses.get(fileKey(entry.repoRoot, entry.filePath));
       if (map && map.has(entry.hunkId)) {
         map.set(entry.hunkId, 'pending');
       }
     } else if (entry.type === 'reject') {
+      const git = this.git.getAdapter(entry.repoRoot);
       if (entry.forwardPatch) {
-        await this.git.applyForward(entry.forwardPatch);
+        await git.applyForward(entry.forwardPatch);
       } else if (entry.untrackedInsert) {
-        await this.git.reInsertUntrackedLines(
+        await git.reInsertUntrackedLines(
           entry.filePath,
           entry.untrackedInsert.lineIndex,
           entry.untrackedInsert.lines,
@@ -242,7 +283,7 @@ export class StateManager {
     }
 
     this.persist();
-    return { filePath: entry.filePath, undoneType: entry.type };
+    return { repoRoot: entry.repoRoot, filePath: entry.filePath, undoneType: entry.type };
   }
 
   /**
@@ -258,7 +299,7 @@ export class StateManager {
    * Remove files that are no longer in the diff (e.g., after a commit).
    */
   pruneCommittedFiles(currentDiffFiles: DiffFile[]): void {
-    const currentPaths = new Set(currentDiffFiles.map((f) => f.newPath || f.oldPath));
+    const currentPaths = new Set(currentDiffFiles.map((f) => fileKeyOf(f)));
     let changed = false;
     for (const path of this.statuses.keys()) {
       if (!currentPaths.has(path)) {
@@ -276,7 +317,7 @@ export class StateManager {
       return;
     }
     const data: Record<string, Record<string, HunkStatus>> = {};
-    for (const [filePath, map] of this.statuses) {
+    for (const [key, map] of this.statuses) {
       const obj: Record<string, HunkStatus> = {};
       for (const [id, status] of map) {
         // Only persist approved (pending is default, rejected hunks are gone)
@@ -285,7 +326,7 @@ export class StateManager {
         }
       }
       if (Object.keys(obj).length > 0) {
-        data[filePath] = obj;
+        data[key] = obj;
       }
     }
     this.storage.update(STORAGE_KEY, data);
@@ -299,12 +340,17 @@ export class StateManager {
     if (!data) {
       return;
     }
-    for (const [filePath, obj] of Object.entries(data)) {
+    for (const [key, obj] of Object.entries(data)) {
+      // Entries persisted before multi-repo support were keyed by bare path
+      // and can never match again; drop them.
+      if (!key.includes('\0')) {
+        continue;
+      }
       const map = new Map<string, HunkStatus>();
       for (const [id, status] of Object.entries(obj)) {
         map.set(id, status);
       }
-      this.statuses.set(filePath, map);
+      this.statuses.set(key, map);
     }
   }
 }

@@ -2,7 +2,7 @@
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
   "description": "Interactive diff review UI for approving or rejecting individual hunks",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {
@@ -36,7 +36,8 @@
   },
   "qna": "https://github.com/fredsvanelli/diff-reviewer/discussions",
   "activationEvents": [
-    "workspaceContains:.git"
+    "workspaceContains:.git",
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -56,6 +57,24 @@
           "name": "Modified Files"
         }
       ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "diffReviewer.fileTree",
+        "contents": "No git repositories found in the open folders.\nNested repositories are searched up to the depth set by `diffReviewer.repoScanDepth`.\n[Refresh](command:diffReviewer.refresh)",
+        "when": "diffReviewer.noRepos"
+      }
+    ],
+    "configuration": {
+      "title": "Diff Reviewer",
+      "properties": {
+        "diffReviewer.repoScanDepth": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "How many directory levels below a non-git workspace folder to search for nested git repositories."
+        }
+      }
     },
     "commands": [
       {

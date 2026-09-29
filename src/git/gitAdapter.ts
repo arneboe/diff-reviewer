@@ -5,23 +5,16 @@ import { DiffFile, DiffHunk } from '../types';
 import { parseDiff, splitHunks, computeHunkIds } from './diffParser';
 import { isReviewable } from './fileFilter';
 
+/**
+ * Git operations for a single repository. `repoRoot` must be the absolute
+ * top-level directory of the work tree (see repoDiscovery.ts). Every DiffFile
+ * produced here is stamped with that root so callers can route it back.
+ */
 export class GitAdapter {
-  private repoRoot: string | undefined;
+  constructor(private repoRoot: string) {}
 
-  constructor(private workspaceRoot: string) {}
-
-  /**
-   * Discover the git repository root. Must be called before other methods
-   * when the workspace folder may differ from the git root (e.g. monorepos).
-   */
-  async init(): Promise<void> {
-    const toplevel = await this.exec(['rev-parse', '--show-toplevel']);
-    this.repoRoot = toplevel.trim();
-  }
-
-  /** Return the resolved git repo root (falls back to workspaceRoot). */
   getRepoRoot(): string {
-    return this.repoRoot ?? this.workspaceRoot;
+    return this.repoRoot;
   }
 
   /**
@@ -44,7 +37,7 @@ export class GitAdapter {
             hunks.forEach((h, i) => {
               h.id = ids[i];
             });
-            return { ...f, hunks };
+            return { ...f, hunks, repoRoot: this.repoRoot };
           })
       : [];
 
@@ -97,6 +90,7 @@ export class GitAdapter {
       });
 
       return {
+        repoRoot: this.repoRoot,
         oldPath: '/dev/null',
         newPath: filePath,
         hunks,
@@ -117,7 +111,19 @@ export class GitAdapter {
   async getFileDiff(filePath: string): Promise<DiffFile[]> {
     const raw = await this.exec(['diff', 'HEAD', '--', filePath]);
     if (!raw.trim()) {
-      // Not a tracked change — re-build as untracked if the file still exists
+      // No tracked change. Only synthesise an add-only diff if git actually
+      // considers the file untracked; a tracked file whose last hunk was just
+      // rejected must not be presented as a brand-new file.
+      const untrackedList = await this.exec([
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+        '--',
+        filePath,
+      ]);
+      if (!untrackedList.trim()) {
+        return [];
+      }
       const untracked = await this.buildUntrackedDiffFile(filePath);
       return untracked ? [untracked] : [];
     }
@@ -128,7 +134,7 @@ export class GitAdapter {
       hunks.forEach((h, i) => {
         h.id = ids[i];
       });
-      return { ...f, hunks };
+      return { ...f, hunks, repoRoot: this.repoRoot };
     });
   }
 

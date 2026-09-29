@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { DiffFile, HunkStatus, WebviewToExtMessage } from '../types';
+import { DiffFile, FileRef, HunkStatus, WebviewToExtMessage, fileKey, fileKeyOf } from '../types';
 
 interface FileData {
   file: DiffFile;
@@ -9,7 +9,7 @@ interface FileData {
 }
 
 export class DiffPanelProvider {
-  /** Track one panel per file path */
+  /** Track one panel per file (keyed by repoRoot + path) */
   private panels = new Map<string, vscode.WebviewPanel>();
   /** Pending data to send once the webview signals 'ready' */
   private pendingData = new Map<string, FileData>();
@@ -17,7 +17,7 @@ export class DiffPanelProvider {
   constructor(
     private extensionUri: vscode.Uri,
     private onMessage: (msg: WebviewToExtMessage) => void,
-    private onPanelFocus?: (filePath: string) => void,
+    private onPanelFocus?: (ref: FileRef) => void,
   ) {}
 
   showFile(
@@ -27,7 +27,8 @@ export class DiffPanelProvider {
     highlightedLines: string[],
   ): void {
     const filePath = file.newPath || file.oldPath;
-    const existing = this.panels.get(filePath);
+    const key = fileKeyOf(file);
+    const existing = this.panels.get(key);
 
     if (existing) {
       existing.reveal(vscode.ViewColumn.One);
@@ -57,11 +58,11 @@ export class DiffPanelProvider {
 
     panel.webview.html = this.getHtml(panel.webview);
 
-    this.pendingData.set(filePath, { file, statuses, fileContent, highlightedLines });
+    this.pendingData.set(key, { file, statuses, fileContent, highlightedLines });
 
     panel.webview.onDidReceiveMessage((msg: WebviewToExtMessage) => {
       if (msg.command === 'ready') {
-        const pending = this.pendingData.get(filePath);
+        const pending = this.pendingData.get(key);
         if (pending) {
           panel.webview.postMessage({
             command: 'showFile',
@@ -70,7 +71,7 @@ export class DiffPanelProvider {
             fileContent: pending.fileContent,
             highlightedLines: pending.highlightedLines,
           });
-          this.pendingData.delete(filePath);
+          this.pendingData.delete(key);
         }
         return;
       }
@@ -79,20 +80,20 @@ export class DiffPanelProvider {
 
     panel.onDidChangeViewState((e) => {
       if (e.webviewPanel.active && this.onPanelFocus) {
-        this.onPanelFocus(filePath);
+        this.onPanelFocus({ repoRoot: file.repoRoot, filePath });
       }
     });
 
     panel.onDidDispose(() => {
-      this.panels.delete(filePath);
-      this.pendingData.delete(filePath);
+      this.panels.delete(key);
+      this.pendingData.delete(key);
     });
 
-    this.panels.set(filePath, panel);
+    this.panels.set(key, panel);
   }
 
-  updateHunk(filePath: string, hunkIndex: number, status: HunkStatus): void {
-    const panel = this.panels.get(filePath);
+  updateHunk(ref: FileRef, hunkIndex: number, status: HunkStatus): void {
+    const panel = this.panels.get(fileKey(ref.repoRoot, ref.filePath));
     if (panel) {
       panel.webview.postMessage({ command: 'updateHunk', hunkIndex, status });
     }
@@ -104,8 +105,7 @@ export class DiffPanelProvider {
     fileContent: string[],
     highlightedLines: string[],
   ): void {
-    const filePath = file.newPath || file.oldPath;
-    const panel = this.panels.get(filePath);
+    const panel = this.panels.get(fileKeyOf(file));
     if (panel) {
       panel.webview.postMessage({
         command: 'showFile',
@@ -117,8 +117,8 @@ export class DiffPanelProvider {
     }
   }
 
-  closeFile(filePath: string): void {
-    const panel = this.panels.get(filePath);
+  closeFile(ref: FileRef): void {
+    const panel = this.panels.get(fileKey(ref.repoRoot, ref.filePath));
     if (panel) {
       panel.dispose();
     }

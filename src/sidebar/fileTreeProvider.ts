@@ -1,24 +1,54 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { GitAdapter } from '../git/gitAdapter';
+import { RepoInfo, RepoManager } from '../git/repoManager';
 import { StateManager } from '../state/stateManager';
-import { DiffFile } from '../types';
+import { DiffFile, diffFilePath } from '../types';
 
-export class FileTreeProvider implements vscode.TreeDataProvider<DiffFile> {
-  private _onDidChangeTreeData = new vscode.EventEmitter<DiffFile | undefined>();
+/** Group node shown when more than one repository is present. */
+export interface RepoNode {
+  kind: 'repo';
+  repo: RepoInfo;
+  files: DiffFile[];
+}
+
+export type TreeNode = RepoNode | DiffFile;
+
+function isRepoNode(node: TreeNode): node is RepoNode {
+  return (node as RepoNode).kind === 'repo';
+}
+
+export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
+  private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private files: DiffFile[] = [];
+  private repoNodes: RepoNode[] = [];
 
   constructor(
-    private git: GitAdapter,
+    private repos: RepoManager,
     private stateManager: StateManager,
-  ) {
-    // A
-  }
+  ) {}
 
+  /** Re-discover repositories and reload the aggregated diff. */
   async refresh(): Promise<void> {
-    this.files = await this.git.getDiff();
+    const repos = await this.repos.discover();
+    this.files = await this.repos.getDiff();
+
+    const byRoot = new Map<string, DiffFile[]>();
+    for (const file of this.files) {
+      const list = byRoot.get(file.repoRoot);
+      if (list) {
+        list.push(file);
+      } else {
+        byRoot.set(file.repoRoot, [file]);
+      }
+    }
+    this.repoNodes = repos.map((repo) => ({
+      kind: 'repo',
+      repo,
+      files: byRoot.get(repo.root) ?? [],
+    }));
+
     this._onDidChangeTreeData.fire(undefined);
   }
 
@@ -26,17 +56,73 @@ export class FileTreeProvider implements vscode.TreeDataProvider<DiffFile> {
     return this.files;
   }
 
-  getTreeItem(element: DiffFile): vscode.TreeItem {
-    const filePath = element.newPath || element.oldPath;
+  getRepoCount(): number {
+    return this.repoNodes.length;
+  }
+
+  findFile(repoRoot: string, filePath: string): DiffFile | undefined {
+    return this.files.find((f) => f.repoRoot === repoRoot && diffFilePath(f) === filePath);
+  }
+
+  getTreeItem(element: TreeNode): vscode.TreeItem {
+    if (isRepoNode(element)) {
+      return this.getRepoItem(element);
+    }
+    return this.getFileItem(element);
+  }
+
+  getChildren(element?: TreeNode): TreeNode[] {
+    if (element) {
+      return isRepoNode(element) ? element.files : [];
+    }
+    // A single repository keeps the flat list; several get one group each.
+    if (this.repoNodes.length <= 1) {
+      return this.files;
+    }
+    return this.repoNodes;
+  }
+
+  private getRepoItem(node: RepoNode): vscode.TreeItem {
+    const count = node.files.length;
+    const pendingFiles = node.files.filter(
+      (f) => !this.stateManager.isFileResolved(f.repoRoot, diffFilePath(f)),
+    ).length;
+
+    const item = new vscode.TreeItem(
+      node.repo.name,
+      count > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None,
+    );
+    const location =
+      node.repo.relativePath && node.repo.relativePath !== node.repo.name
+        ? node.repo.relativePath
+        : '';
+    const summary =
+      count === 0
+        ? 'no changes'
+        : `${count} file${count === 1 ? '' : 's'}, ${pendingFiles} pending`;
+    item.description = location ? `${location}  ·  ${summary}` : summary;
+    item.tooltip = node.repo.root;
+    item.iconPath = new vscode.ThemeIcon(
+      pendingFiles === 0 && count > 0 ? 'check' : 'repo',
+      pendingFiles === 0 && count > 0 ? new vscode.ThemeColor('testing.iconPassed') : undefined,
+    );
+    item.contextValue = 'diffRepo';
+    item.id = `repo:${node.repo.root}`;
+    return item;
+  }
+
+  private getFileItem(element: DiffFile): vscode.TreeItem {
+    const filePath = diffFilePath(element);
     const fileName = path.basename(filePath);
     const dirPath = path.dirname(filePath);
-    const resolved = this.stateManager.isFileResolved(filePath);
+    const resolved = this.stateManager.isFileResolved(element.repoRoot, filePath);
 
     if (resolved) {
       const item = new vscode.TreeItem(fileName, vscode.TreeItemCollapsibleState.None);
       item.description = dirPath === '.' ? '' : dirPath + '/';
       item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
       item.contextValue = 'diffFileResolved';
+      item.id = `file:${element.repoRoot}:${filePath}`;
       item.command = {
         command: 'diffReviewer.openFile',
         title: 'Open Diff View',
@@ -56,6 +142,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<DiffFile> {
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
     item.description = dirPath === '.' ? '' : dirPath + '/';
     item.contextValue = 'diffFile';
+    item.id = `file:${element.repoRoot}:${filePath}`;
     if (element.isUntracked) {
       item.iconPath = new vscode.ThemeIcon('new-file');
     }
@@ -65,12 +152,5 @@ export class FileTreeProvider implements vscode.TreeDataProvider<DiffFile> {
       arguments: [element],
     };
     return item;
-  }
-
-  getChildren(element?: DiffFile): DiffFile[] {
-    if (element) {
-      return []; // flat list, no children
-    }
-    return this.files;
   }
 }

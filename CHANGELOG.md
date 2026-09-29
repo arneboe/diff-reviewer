@@ -2,6 +2,22 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [1.2.0] — 2026-09-29
+
+### Added
+- Multi-repository support: when the opened folder is not itself a git repository, nested repositories are discovered automatically (up to `diffReviewer.repoScanDepth` levels deep, default 10) and their changes are aggregated
+- Sidebar groups files under one expandable node per repository when more than one repository is present, with file and pending counts per repository; a single repository keeps the flat list
+- Multi-root workspaces: every workspace folder is scanned, and repositories are re-discovered when folders are added or removed
+- `diffReviewer.repoScanDepth` setting
+- Welcome message in the sidebar when no repository is found
+
+### Changed
+- Hunk statuses, undo entries, and diff panels are now keyed by repository and path, so identical relative paths in different repositories no longer collide. Approvals persisted by earlier versions are discarded on first load
+- Extension now also activates on startup so nested repositories are picked up without a `.git` at the workspace root
+
+### Fixed
+- Rejecting the last remaining hunk of a tracked file no longer re-renders the whole file as a newly added untracked file
+
 ## [1.1.1] — 2026-02-25
 
 ### Fixed
