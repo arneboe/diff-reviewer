@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { RepoInfo, RepoManager } from '../git/repoManager';
+import { RepoInfo } from '../git/repoManager';
 import { DiffFile, diffFilePath } from '../types';
 
 /** Group node shown when more than one repository is present. */
@@ -23,28 +23,52 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private files: DiffFile[] = [];
   private repoNodes: RepoNode[] = [];
 
-  constructor(private repos: RepoManager) {}
+  /** Changed files per repository root, kept across partial updates. */
+  private filesByRoot = new Map<string, DiffFile[]>();
 
-  /** Re-discover repositories and reload the aggregated diff. */
-  async refresh(): Promise<void> {
-    const repos = await this.repos.discover();
-    this.files = await this.repos.getDiff();
-
-    const byRoot = new Map<string, DiffFile[]>();
-    for (const file of this.files) {
-      const list = byRoot.get(file.repoRoot);
-      if (list) {
-        list.push(file);
-      } else {
-        byRoot.set(file.repoRoot, [file]);
+  /** Set the discovered repositories; files of repositories that remain are kept. */
+  setRepos(repos: RepoInfo[]): void {
+    const roots = new Set(repos.map((r) => r.root));
+    for (const root of [...this.filesByRoot.keys()]) {
+      if (!roots.has(root)) {
+        this.filesByRoot.delete(root);
       }
     }
-    this.repoNodes = repos.map((repo) => ({
-      kind: 'repo',
-      repo,
-      files: byRoot.get(repo.root) ?? [],
-    }));
+    this.repoNodes = repos.map((repo) => ({ kind: 'repo', repo, files: [] }));
+    this.rebuild();
+  }
 
+  /** Replace every file of one repository. */
+  setRepoFiles(repoRoot: string, files: DiffFile[]): void {
+    this.filesByRoot.set(repoRoot, files);
+    this.rebuild();
+  }
+
+  /**
+   * Replace one file after an action, or remove it when it has nothing left
+   * to review. A file not yet listed is appended to its repository.
+   */
+  updateFile(repoRoot: string, filePath: string, file: DiffFile | null): void {
+    const list = [...(this.filesByRoot.get(repoRoot) ?? [])];
+    const idx = list.findIndex((f) => diffFilePath(f) === filePath);
+    if (file && idx >= 0) {
+      list[idx] = file;
+    } else if (file) {
+      list.push(file);
+    } else if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      return;
+    }
+    this.filesByRoot.set(repoRoot, list);
+    this.rebuild();
+  }
+
+  private rebuild(): void {
+    for (const node of this.repoNodes) {
+      node.files = this.filesByRoot.get(node.repo.root) ?? [];
+    }
+    this.files = this.repoNodes.flatMap((n) => n.files);
     this._onDidChangeTreeData.fire(undefined);
   }
 

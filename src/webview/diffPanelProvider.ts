@@ -14,6 +14,8 @@ export class DiffPanelProvider {
   private pendingData = new Map<string, FileData>();
   /** Which file each open panel shows, keyed like `panels` */
   private refs = new Map<string, FileRef>();
+  /** Signature of the data last sent to each panel, to skip identical re-renders */
+  private sent = new Map<string, string>();
 
   constructor(
     private extensionUri: vscode.Uri,
@@ -25,6 +27,8 @@ export class DiffPanelProvider {
     const filePath = file.newPath || file.oldPath;
     const key = fileKeyOf(file);
     const existing = this.panels.get(key);
+
+    this.sent.set(key, signature(file, fileContent));
 
     if (existing) {
       existing.reveal(vscode.ViewColumn.One);
@@ -83,6 +87,7 @@ export class DiffPanelProvider {
       this.panels.delete(key);
       this.pendingData.delete(key);
       this.refs.delete(key);
+      this.sent.delete(key);
     });
 
     this.panels.set(key, panel);
@@ -94,8 +99,18 @@ export class DiffPanelProvider {
   }
 
   refreshFile(file: DiffFile, fileContent: string[], highlightedLines: string[]): void {
-    const panel = this.panels.get(fileKeyOf(file));
-    if (panel) {
+    const key = fileKeyOf(file);
+    const panel = this.panels.get(key);
+    if (!panel) {
+      return;
+    }
+    this.sent.set(key, signature(file, fileContent));
+    if (this.pendingData.has(key)) {
+      // Webview not ready yet: replace what it will receive on 'ready'.
+      this.pendingData.set(key, { file, fileContent, highlightedLines });
+      return;
+    }
+    {
       panel.webview.postMessage({
         command: 'showFile',
         file,
@@ -103,6 +118,15 @@ export class DiffPanelProvider {
         highlightedLines,
       });
     }
+  }
+
+  /** True when the panel for this file already shows exactly this data. */
+  isUnchanged(file: DiffFile, fileContent: string[]): boolean {
+    return this.sent.get(fileKeyOf(file)) === signature(file, fileContent);
+  }
+
+  isOpen(ref: FileRef): boolean {
+    return this.panels.has(fileKey(ref.repoRoot, ref.filePath));
   }
 
   closeFile(ref: FileRef): void {
@@ -119,6 +143,7 @@ export class DiffPanelProvider {
     this.panels.clear();
     this.pendingData.clear();
     this.refs.clear();
+    this.sent.clear();
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -145,6 +170,10 @@ export class DiffPanelProvider {
 </body>
 </html>`;
   }
+}
+
+function signature(file: DiffFile, fileContent: string[]): string {
+  return JSON.stringify(file) + '\0' + fileContent.join('\n');
 }
 
 function getNonce(): string {
