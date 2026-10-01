@@ -68,25 +68,6 @@ export type UndoEntry = {
   | { type: 'worktree-mode'; previousMode: number }
 );
 
-// Extension → Webview messages
-export type ExtToWebviewMessage = {
-  command: 'showFile';
-  file: DiffFile;
-  fileContent: string[];
-  highlightedLines: string[];
-};
-
-// Webview → Extension messages
-// Every file-scoped message carries repoRoot so the extension can route it to
-// the right repository when several are open.
-export type WebviewToExtMessage =
-  | { command: 'ready' }
-  | { command: 'approve'; repoRoot: string; filePath: string; hunkIndex: number; hunkId?: string }
-  | { command: 'reject'; repoRoot: string; filePath: string; hunkIndex: number; hunkId?: string }
-  | { command: 'approveAll'; repoRoot: string; filePath: string }
-  | { command: 'rejectAll'; repoRoot: string; filePath: string }
-  | { command: 'openInEditor'; repoRoot: string; filePath: string };
-
 /** Identifies one file within one repository. */
 export interface FileRef {
   repoRoot: string;

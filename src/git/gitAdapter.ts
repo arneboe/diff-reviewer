@@ -260,26 +260,6 @@ export class GitAdapter {
     await this.exec(['apply', '--unidiff-zero', '-'], patch);
   }
 
-  /**
-   * Current working-tree content of a file, split into lines. A missing file
-   * yields an empty array. The final newline does not produce an extra line.
-   */
-  async getFileContent(filePath: string): Promise<string[]> {
-    try {
-      const content = await readFile(join(this.repoRoot, filePath), 'utf-8');
-      const lines = content.split('\n');
-      if (lines.length > 0 && lines[lines.length - 1] === '') {
-        lines.pop();
-      }
-      return lines;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return [];
-      }
-      throw err;
-    }
-  }
-
   /** Raw bytes and permission bits of a working-tree file; null content when missing. */
   async snapshotWorktreeFile(filePath: string): Promise<{ content: Buffer | null; mode: number }> {
     const absPath = join(this.repoRoot, filePath);
