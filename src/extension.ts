@@ -1,11 +1,12 @@
 import { basename, join } from 'path';
 import * as vscode from 'vscode';
 import { RepoManager } from './git/repoManager';
+import { ReviewCodeLensProvider } from './review/reviewCodeLensProvider';
+import { hunkAtOrAfter, neighbourHunkLine } from './review/reviewModel';
+import { ReviewModeController } from './review/reviewModeController';
 import { FileTreeProvider } from './sidebar/fileTreeProvider';
-import { DiffPanelProvider } from './webview/diffPanelProvider';
 import { StateManager, UndoRefusedError } from './state/stateManager';
-import { DiffFile, FileRef, WebviewToExtMessage, diffFilePath } from './types';
-import { highlightFileContent } from './highlighter';
+import { DiffFile, FileRef, diffFilePath } from './types';
 
 const CONFIG_SECTION = 'diffReviewer';
 const DEFAULT_SCAN_DEPTH = 10;
@@ -16,7 +17,7 @@ const WATCH_DEBOUNCE_MS = 300;
 
 let repos: RepoManager;
 let fileTreeProvider: FileTreeProvider;
-let diffPanelProvider: DiffPanelProvider;
+let reviewMode: ReviewModeController;
 let stateManager: StateManager;
 let extensionContext: vscode.ExtensionContext;
 
@@ -80,29 +81,72 @@ export async function activate(context: vscode.ExtensionContext) {
     treeView.badge = count > 0 ? { value: count, tooltip: `${count} files to review` } : undefined;
   });
 
-  // Webview panel provider
-  diffPanelProvider = new DiffPanelProvider(
-    context.extensionUri,
-    handleWebviewMessage,
-    handlePanelFocus,
+  // Review mode: decorations, comment widgets and CodeLenses in the normal editor
+  reviewMode = new ReviewModeController(context, {
+    findFile: (repoRoot, filePath) => fileTreeProvider.findFile(repoRoot, filePath),
+    repoForPath: (absPath) => repos.repoForPath(absPath),
+    onActiveFileChanged: (ref) => {
+      dirtyRoots.add(ref.repoRoot);
+      scheduleWatchRefresh();
+    },
+  });
+  context.subscriptions.push(
+    vscode.languages.registerCodeLensProvider(
+      { scheme: 'file' },
+      new ReviewCodeLensProvider(reviewMode),
+    ),
   );
-  context.subscriptions.push({ dispose: () => diffPanelProvider.dispose() });
 
   // Commands
   context.subscriptions.push(
     vscode.commands.registerCommand('diffReviewer.refresh', () => fullRefresh()),
+    vscode.commands.registerCommand('diffReviewer.undo', () => undoLastAction()),
 
     vscode.commands.registerCommand('diffReviewer.openFile', (file: DiffFile) => openFile(file)),
-
     vscode.commands.registerCommand('diffReviewer.approveFile', (file: DiffFile) =>
-      runAction('Approve file', refOf(file), (fresh) => stateManager.approveAll(fresh)),
+      fileAction(true, refOf(file)),
     ),
-
     vscode.commands.registerCommand('diffReviewer.rejectFile', (file: DiffFile) =>
-      runAction('Reject file', refOf(file), (fresh) => stateManager.rejectAll(fresh)),
+      fileAction(false, refOf(file)),
     ),
 
-    vscode.commands.registerCommand('diffReviewer.undo', () => undoLastAction()),
+    vscode.commands.registerCommand('diffReviewer.toggleReviewMode', () => reviewMode.toggle()),
+    vscode.commands.registerCommand('diffReviewer.enableReviewMode', () =>
+      reviewMode.setEnabled(true),
+    ),
+    vscode.commands.registerCommand('diffReviewer.disableReviewMode', () =>
+      reviewMode.setEnabled(false),
+    ),
+
+    // CodeLens targets
+    vscode.commands.registerCommand(
+      'diffReviewer.approveHunk',
+      (repoRoot: string, filePath: string, hunkId: string) =>
+        hunkAction(true, { repoRoot, filePath }, hunkId),
+    ),
+    vscode.commands.registerCommand(
+      'diffReviewer.rejectHunk',
+      (repoRoot: string, filePath: string, hunkId: string) =>
+        hunkAction(false, { repoRoot, filePath }, hunkId),
+    ),
+    vscode.commands.registerCommand('diffReviewer.approveFileRef', (ref: FileRef) =>
+      fileAction(true, ref),
+    ),
+    vscode.commands.registerCommand('diffReviewer.rejectFileRef', (ref: FileRef) =>
+      fileAction(false, ref),
+    ),
+
+    // Editor commands (Command Palette / user keybindings)
+    vscode.commands.registerCommand('diffReviewer.approveHunkAtCursor', () =>
+      cursorHunkAction(true),
+    ),
+    vscode.commands.registerCommand('diffReviewer.rejectHunkAtCursor', () =>
+      cursorHunkAction(false),
+    ),
+    vscode.commands.registerCommand('diffReviewer.nextHunk', () => navigateHunk('next')),
+    vscode.commands.registerCommand('diffReviewer.previousHunk', () => navigateHunk('prev')),
+    vscode.commands.registerCommand('diffReviewer.approveActiveFile', () => activeFileAction(true)),
+    vscode.commands.registerCommand('diffReviewer.rejectActiveFile', () => activeFileAction(false)),
   );
 
   // Re-discover repos when the workspace or the scan depth changes
@@ -142,6 +186,10 @@ function refOf(file: DiffFile): FileRef {
   return { repoRoot: file.repoRoot, filePath: diffFilePath(file) };
 }
 
+function sameRef(a: FileRef | undefined, b: FileRef): boolean {
+  return a?.repoRoot === b.repoRoot && a.filePath === b.filePath;
+}
+
 // ---- refresh --------------------------------------------------------------
 
 /**
@@ -171,7 +219,7 @@ function refreshRepos(roots: Iterable<string>): Promise<void> {
 
 /**
  * Re-read the given repositories: their files, HEAD and staged state, and the
- * panels showing their files. Must run inside the queue.
+ * editors showing their files. Must run inside the queue.
  */
 async function readRepos(roots: string[]): Promise<void> {
   await Promise.all(
@@ -189,40 +237,28 @@ async function readRepos(roots: string[]): Promise<void> {
       }
     }),
   );
-  const rootSet = new Set(roots);
-  for (const ref of diffPanelProvider.openRefs()) {
-    if (rootSet.has(ref.repoRoot)) {
-      await refreshPanel(ref);
-    }
-  }
+  reviewMode.refreshRepos(roots);
   updateContexts();
 }
 
-/** Re-send one panel from the tree, or close it when its file is done. */
-async function refreshPanel(ref: FileRef): Promise<void> {
-  const file = fileTreeProvider.findFile(ref.repoRoot, ref.filePath);
-  if (file) {
-    await sendRefresh(file);
-  } else {
-    diffPanelProvider.closeFile(ref);
-  }
-}
-
-/** Send a file to its open panel unless the panel already shows exactly that. */
-async function sendRefresh(file: DiffFile): Promise<void> {
-  const filePath = diffFilePath(file);
-  const fileContent = await repos.getAdapter(file.repoRoot).getFileContent(filePath);
-  if (diffPanelProvider.isUnchanged(file, fileContent)) {
+/**
+ * Open a file in the normal editor and switch review mode on. Deleted and
+ * binary files have no editor to show; they are handled from the sidebar.
+ */
+async function openFile(file: DiffFile): Promise<void> {
+  const ref = refOf(file);
+  if (file.kind === 'deleted' || file.worktreeMissing || file.isBinary) {
+    const what = file.isBinary ? 'Binary file' : 'Deleted file';
+    vscode.window.showInformationMessage(
+      `${what} ${basename(ref.filePath)} cannot be opened in an editor. Use the Approve / Reject buttons next to it in the sidebar.`,
+    );
     return;
   }
-  diffPanelProvider.refreshFile(file, fileContent, highlightFileContent(filePath, fileContent));
-}
-
-async function openFile(file: DiffFile): Promise<void> {
-  const filePath = diffFilePath(file);
-  const fileContent = await repos.getAdapter(file.repoRoot).getFileContent(filePath);
-  const highlightedLines = highlightFileContent(filePath, fileContent);
-  diffPanelProvider.showFile(file, fileContent, highlightedLines);
+  await vscode.window.showTextDocument(vscode.Uri.file(join(ref.repoRoot, ref.filePath)), {
+    preview: false,
+  });
+  reviewMode.setEnabled(true);
+  reviewMode.revealNextHunkFrom(ref, 0);
 }
 
 function updateContexts(): void {
@@ -240,6 +276,7 @@ function updateContexts(): void {
     'diffReviewer.clean',
     repoCount > 0 && pending === 0 && !anyStaged,
   );
+  reviewMode.setStatusBarVisible(repoCount > 0);
 }
 
 // ---- watchers ---------------------------------------------------------------
@@ -316,18 +353,15 @@ async function updateGitDirWatchers(): Promise<void> {
   }
 }
 
-function handlePanelFocus(ref: FileRef): Promise<void> {
-  return refreshRepos([ref.repoRoot]);
-}
-
 // ---- actions ----------------------------------------------------------------
 
 /**
  * Run a git-mutating review action on one file and update only that file.
  *
  * The file is re-read inside the queue first, so the action never works on a
- * stale diff. When the action finishes a file whose panel was open, the panel
- * closes and the next file still to review opens in its place.
+ * stale diff. When the file is shown in the active editor, the cursor moves
+ * on to the next pending hunk, or, once the file is finished, the next file
+ * still to review opens.
  */
 function runAction(
   label: string,
@@ -336,7 +370,8 @@ function runAction(
 ): Promise<void> {
   return enqueue(async () => {
     const adapter = repos.getAdapter(ref.repoRoot);
-    const panelWasOpen = diffPanelProvider.isOpen(ref);
+    const wasActive = sameRef(reviewMode.activeRef(), ref);
+    const cursorLine = vscode.window.activeTextEditor?.selection.active.line ?? 0;
     const orderBefore = fileTreeProvider.getFiles();
 
     let after: DiffFile | null;
@@ -352,11 +387,11 @@ function runAction(
       return;
     }
 
-    if (after) {
-      await sendRefresh(after);
-    } else {
-      diffPanelProvider.closeFile(ref);
-      if (panelWasOpen) {
+    reviewMode.refreshFile(ref);
+    if (wasActive) {
+      if (after) {
+        reviewMode.revealNextHunkFrom(ref, cursorLine);
+      } else {
         const next = nextFileToReview(orderBefore, ref);
         if (next) {
           await openFile(next);
@@ -388,6 +423,97 @@ function nextFileToReview(orderBefore: DiffFile[], done: FileRef): DiffFile | un
   return remaining[0];
 }
 
+/** True (after telling the user) when the file's editor has unsaved changes. */
+function blockedByUnsavedEdits(ref: FileRef): boolean {
+  if (!reviewMode.documentFor(ref)?.isDirty) {
+    return false;
+  }
+  vscode.window.showInformationMessage('Save the file to continue reviewing.');
+  return true;
+}
+
+/** Approve or reject one hunk, identified by its content ID. */
+function hunkAction(isApprove: boolean, ref: FileRef, hunkId: string): Promise<void> {
+  if (blockedByUnsavedEdits(ref)) {
+    return Promise.resolve();
+  }
+  return runAction(isApprove ? 'Approve' : 'Reject', ref, async (fresh) => {
+    // The lens knows the hunk by its content ID; resolve it on the fresh diff.
+    const hunk = fresh.hunks.find((h) => h.id === hunkId);
+    if (!hunk && !StateManager.isWholeFile(fresh)) {
+      vscode.window.showInformationMessage('The change moved; the view was refreshed.');
+      return fresh;
+    }
+    const id = hunk?.id ?? '';
+    return isApprove ? stateManager.approve(fresh, id) : stateManager.reject(fresh, id);
+  });
+}
+
+/** Approve or reject every unstaged change of one file. */
+function fileAction(isApprove: boolean, ref: FileRef): Promise<void> {
+  if (blockedByUnsavedEdits(ref)) {
+    return Promise.resolve();
+  }
+  return runAction(isApprove ? 'Approve file' : 'Reject file', ref, (fresh) =>
+    isApprove ? stateManager.approveAll(fresh) : stateManager.rejectAll(fresh),
+  );
+}
+
+/** The active editor's file when review mode draws it, else a message. */
+function activeReviewedEditor(): { editor: vscode.TextEditor; ref: FileRef } | undefined {
+  const editor = vscode.window.activeTextEditor;
+  const ref = reviewMode.activeRef();
+  if (!editor || !ref) {
+    vscode.window.showInformationMessage(
+      reviewMode.isEnabled()
+        ? 'The active editor has no unstaged changes to review.'
+        : 'Review mode is off. Turn it on to review the active file.',
+    );
+    return undefined;
+  }
+  return { editor, ref };
+}
+
+function cursorHunkAction(isApprove: boolean): Promise<void> {
+  const target = activeReviewedEditor();
+  if (!target) {
+    return Promise.resolve();
+  }
+  const { editor, ref } = target;
+  const model = reviewMode.modelFor(editor.document);
+  if (!model) {
+    return Promise.resolve();
+  }
+  if (model.wholeFile) {
+    return fileAction(isApprove, ref);
+  }
+  const hunk = hunkAtOrAfter(model, editor.selection.active.line);
+  if (!hunk) {
+    vscode.window.showInformationMessage('No pending hunk at or after the cursor.');
+    return Promise.resolve();
+  }
+  return hunkAction(isApprove, ref, hunk.hunkId);
+}
+
+function activeFileAction(isApprove: boolean): Promise<void> {
+  const target = activeReviewedEditor();
+  return target ? fileAction(isApprove, target.ref) : Promise.resolve();
+}
+
+function navigateHunk(dir: 'next' | 'prev'): void {
+  const target = activeReviewedEditor();
+  if (!target) {
+    return;
+  }
+  const model = reviewMode.modelFor(target.editor.document);
+  const line = model && neighbourHunkLine(model, target.editor.selection.active.line, dir);
+  if (line === undefined) {
+    vscode.window.showInformationMessage('This file has no pending hunks.');
+    return;
+  }
+  reviewMode.revealLine(target.editor, line);
+}
+
 function undoLastAction(): Promise<void> {
   return enqueue(async () => {
     try {
@@ -408,46 +534,6 @@ function undoLastAction(): Promise<void> {
       await readRepos(repos.getRepos().map((r) => r.root));
     }
   });
-}
-
-async function handleWebviewMessage(msg: WebviewToExtMessage): Promise<void> {
-  if (msg.command === 'ready') {
-    return;
-  }
-
-  if (msg.command === 'openInEditor') {
-    const fileUri = vscode.Uri.file(join(msg.repoRoot, msg.filePath));
-    await vscode.window.showTextDocument(fileUri, { preview: false });
-    return;
-  }
-
-  const ref: FileRef = { repoRoot: msg.repoRoot, filePath: msg.filePath };
-
-  if (msg.command === 'approve' || msg.command === 'reject') {
-    // The panel knows the hunk by its content ID; resolve it on the fresh diff.
-    const shownId =
-      msg.hunkId ?? fileTreeProvider.findFile(ref.repoRoot, ref.filePath)?.hunks[msg.hunkIndex]?.id;
-    const isApprove = msg.command === 'approve';
-    await runAction(isApprove ? 'Approve' : 'Reject', ref, async (fresh) => {
-      const hunk = fresh.hunks.find((h) => h.id === shownId);
-      if (!hunk && !StateManager.isWholeFile(fresh)) {
-        vscode.window.showInformationMessage('The change moved; the view was refreshed.');
-        return fresh;
-      }
-      const hunkId = hunk?.id ?? '';
-      return isApprove ? stateManager.approve(fresh, hunkId) : stateManager.reject(fresh, hunkId);
-    });
-    return;
-  }
-
-  if (msg.command === 'approveAll') {
-    await runAction('Approve file', ref, (fresh) => stateManager.approveAll(fresh));
-    return;
-  }
-
-  if (msg.command === 'rejectAll') {
-    await runAction('Reject file', ref, (fresh) => stateManager.rejectAll(fresh));
-  }
 }
 
 export function deactivate() {

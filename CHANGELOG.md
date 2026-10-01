@@ -2,6 +2,23 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.0.0] — 2026-10-01
+
+### Changed
+- **Review happens in the normal editor.** Clicking a file in the sidebar opens it in a regular text editor and turns on *review mode*: added lines are highlighted, removed lines appear in a read-only inline widget below the line they followed, and every pending hunk gets an **Approve** / **Reject** CodeLens. A file-level CodeLens on the first line approves or rejects the whole file. All editor features (Ctrl+click, search, editing, hovers from other extensions) keep working
+- Review mode is global and off after every window reload. Turn it off (status bar item, sidebar button, or **Disable Review Mode**) and the editor behaves exactly as usual; turn it on and every visible editor with unstaged changes is decorated
+- Deleted and binary files have no editor to show; clicking them explains that, and the sidebar's Approve / Reject buttons handle them
+- The finished file's editor stays open when the next file to review opens
+
+### Added
+- Status bar item and sidebar title button that toggle review mode; commands **Toggle / Enable / Disable Review Mode**
+- Commands **Approve Hunk at Cursor**, **Reject Hunk at Cursor**, **Go to Next Hunk**, **Go to Previous Hunk**, **Approve Active File**, **Reject Active File**, for the Command Palette or your own keybindings (none are bound by default)
+- Unsaved edits: while a reviewed file has unsaved changes its highlights turn into dimmed markers that follow your edits, and approve / reject wait until the file is saved
+
+### Removed
+- The webview diff panel, its syntax highlighter and the `highlight.js` dependency
+- The two-step "Confirm?" on Reject; use **Undo Last Action** instead
+
 ## [2.1.0] — 2026-09-29
 
 ### Added

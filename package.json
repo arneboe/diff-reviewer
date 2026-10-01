@@ -1,8 +1,8 @@
 {
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
-  "description": "Interactive diff review UI: approve (stage) or reject (discard) individual hunks",
-  "version": "2.1.0",
+  "description": "Review unstaged changes in the normal editor: approve (stage) or reject (discard) individual hunks",
+  "version": "3.0.0",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {
@@ -90,39 +90,162 @@
       {
         "command": "diffReviewer.refresh",
         "title": "Refresh Diff",
-        "icon": "$(refresh)"
+        "icon": "$(refresh)",
+        "category": "Diff Reviewer"
       },
       {
         "command": "diffReviewer.openFile",
-        "title": "Open Diff View"
+        "title": "Open File for Review",
+        "category": "Diff Reviewer"
       },
       {
         "command": "diffReviewer.undo",
         "title": "Undo Last Action",
-        "icon": "$(discard)"
+        "icon": "$(discard)",
+        "category": "Diff Reviewer"
       },
       {
         "command": "diffReviewer.approveFile",
         "title": "Approve File (stage)",
-        "icon": "$(check)"
+        "icon": "$(check)",
+        "category": "Diff Reviewer"
       },
       {
         "command": "diffReviewer.rejectFile",
         "title": "Reject File (discard)",
-        "icon": "$(close)"
+        "icon": "$(close)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.toggleReviewMode",
+        "title": "Toggle Review Mode",
+        "icon": "$(eye)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.enableReviewMode",
+        "title": "Enable Review Mode",
+        "icon": "$(eye-closed)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.disableReviewMode",
+        "title": "Disable Review Mode",
+        "icon": "$(eye)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.approveHunk",
+        "title": "Approve Hunk (stage)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.rejectHunk",
+        "title": "Reject Hunk (discard)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.approveFileRef",
+        "title": "Approve File (stage)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.rejectFileRef",
+        "title": "Reject File (discard)",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.approveHunkAtCursor",
+        "title": "Approve Hunk at Cursor (stage)",
+        "icon": "$(check)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.rejectHunkAtCursor",
+        "title": "Reject Hunk at Cursor (discard)",
+        "icon": "$(close)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.nextHunk",
+        "title": "Go to Next Hunk",
+        "icon": "$(arrow-down)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.previousHunk",
+        "title": "Go to Previous Hunk",
+        "icon": "$(arrow-up)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.approveActiveFile",
+        "title": "Approve Active File (stage)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
+      },
+      {
+        "command": "diffReviewer.rejectActiveFile",
+        "title": "Reject Active File (discard)",
+        "enablement": "diffReviewer.reviewMode",
+        "category": "Diff Reviewer"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "diffReviewer.openFile",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.approveFile",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.rejectFile",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.approveHunk",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.rejectHunk",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.approveFileRef",
+          "when": "false"
+        },
+        {
+          "command": "diffReviewer.rejectFileRef",
+          "when": "false"
+        }
+      ],
       "view/title": [
+        {
+          "command": "diffReviewer.enableReviewMode",
+          "when": "view == diffReviewer.fileTree && !diffReviewer.reviewMode",
+          "group": "navigation@1"
+        },
+        {
+          "command": "diffReviewer.disableReviewMode",
+          "when": "view == diffReviewer.fileTree && diffReviewer.reviewMode",
+          "group": "navigation@1"
+        },
         {
           "command": "diffReviewer.refresh",
           "when": "view == diffReviewer.fileTree",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "diffReviewer.undo",
           "when": "view == diffReviewer.fileTree",
-          "group": "navigation"
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -164,8 +287,5 @@
     "tsx": "^4.7.0",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.56.0"
-  },
-  "dependencies": {
-    "highlight.js": "^11.11.1"
   }
 }

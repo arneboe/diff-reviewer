@@ -145,7 +145,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
     item.command = {
       command: 'diffReviewer.openFile',
-      title: 'Open Diff View',
+      title: 'Open File for Review',
       arguments: [element],
     };
     return item;
