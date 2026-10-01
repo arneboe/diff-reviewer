@@ -219,11 +219,20 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       return;
     }
     this.settingsPromptShown = true;
+    const missing = [
+      ...(codeLens
+        ? []
+        : ['"diffEditor.codeLens": true (VS Code hides CodeLens in diffs by default)']),
+      ...(sideBySide ? ['"diffEditor.renderSideBySide": false (inline view)'] : []),
+    ];
     void vscode.window
       .showInformationMessage(
-        'Diff Reviewer shows Approve / Reject as CodeLens and removed lines inline. Enable "diffEditor.codeLens" and the inline diff view for this workspace?',
+        'Diff Reviewer: enable the diff editor settings it relies on for this workspace?',
+        {
+          modal: true,
+          detail: `Without them the Approve / Reject CodeLenses do not show in the diff.\n\n${missing.join('\n')}`,
+        },
         'Enable',
-        'Not now',
         "Don't ask again",
       )
       .then(async (choice) => {

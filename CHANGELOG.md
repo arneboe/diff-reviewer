@@ -2,6 +2,11 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.1] — 2026-10-01
+
+### Fixed
+- The offer to enable `diffEditor.codeLens` and the inline diff view is now a modal dialog that lists the missing settings, so it cannot be missed. Without `diffEditor.codeLens` VS Code hides the Approve / Reject CodeLenses in the diff
+
 ## [3.1.0] — 2026-10-01
 
 ### Changed
