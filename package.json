@@ -2,7 +2,7 @@
   "name": "diff-reviewer",
   "displayName": "Diff Reviewer",
   "description": "Review unstaged changes in the normal editor: approve (stage) or reject (discard) individual hunks",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "publisher": "fredsvanelli",
   "license": "MIT",
   "repository": {
