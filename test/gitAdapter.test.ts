@@ -37,6 +37,19 @@ describe('GitAdapter', () => {
     }
   });
 
+  it('reads the index version of a file, empty when the index has none', async () => {
+    repo.write('a.txt', 'one\ntwo\n');
+    repo.commitAll();
+    repo.write('a.txt', 'one\nstaged\n');
+    repo.git('add', 'a.txt');
+    repo.write('a.txt', 'one\nstaged\nunstaged\n');
+    repo.write('new.txt', 'x\n');
+
+    assert.equal(await git.getIndexContent('a.txt'), 'one\nstaged\n');
+    assert.equal(await git.getIndexContent('new.txt'), '');
+    assert.equal(await git.getIndexContent('missing.txt'), '');
+  });
+
   it('shows only the unstaged part of a partially staged file', async () => {
     repo.write('a.txt', lines(10));
     repo.commitAll();

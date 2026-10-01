@@ -1,4 +1,4 @@
-import { basename, join } from 'path';
+import { basename } from 'path';
 import * as vscode from 'vscode';
 import { RepoManager } from './git/repoManager';
 import { ReviewCodeLensProvider } from './review/reviewCodeLensProvider';
@@ -81,10 +81,11 @@ export async function activate(context: vscode.ExtensionContext) {
     treeView.badge = count > 0 ? { value: count, tooltip: `${count} files to review` } : undefined;
   });
 
-  // Review mode: decorations, comment widgets and CodeLenses in the normal editor
+  // Review mode: diff editors, decorations and CodeLenses
   reviewMode = new ReviewModeController(context, {
     findFile: (repoRoot, filePath) => fileTreeProvider.findFile(repoRoot, filePath),
     repoForPath: (absPath) => repos.repoForPath(absPath),
+    readIndexContent: (ref) => repos.getAdapter(ref.repoRoot).getIndexContent(ref.filePath),
     onActiveFileChanged: (ref) => {
       dirtyRoots.add(ref.repoRoot);
       scheduleWatchRefresh();
@@ -242,8 +243,9 @@ async function readRepos(roots: string[]): Promise<void> {
 }
 
 /**
- * Open a file in the normal editor and switch review mode on. Deleted and
- * binary files have no editor to show; they are handled from the sidebar.
+ * Open a file as an index ↔ working-tree diff and switch review mode on.
+ * Deleted and binary files have no editor to show; they are handled from the
+ * sidebar.
  */
 async function openFile(file: DiffFile): Promise<void> {
   const ref = refOf(file);
@@ -254,11 +256,7 @@ async function openFile(file: DiffFile): Promise<void> {
     );
     return;
   }
-  await vscode.window.showTextDocument(vscode.Uri.file(join(ref.repoRoot, ref.filePath)), {
-    preview: false,
-  });
-  reviewMode.setEnabled(true);
-  reviewMode.revealNextHunkFrom(ref, 0);
+  await reviewMode.openForReview(ref);
 }
 
 function updateContexts(): void {

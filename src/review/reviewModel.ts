@@ -9,10 +9,9 @@
  * `newCount = 0` and `newStart` pointing at the line that follows the removed
  * block, which is `lineCount + 1` for a deletion at the end of the file.
  *
- * All positions returned here are 0-based editor lines. Comment widgets are
- * drawn below the last line of their range and CodeLenses above their line,
- * so a removal before line `newStart` anchors its widget at `newStart - 2`
- * and its lens at `newStart - 1`.
+ * All positions returned here are 0-based editor lines. CodeLenses are drawn
+ * above their line, so a hunk's lens sits at `newStart - 1`; a removal before
+ * line `newStart` is anchored to the line it followed, `newStart - 2`.
  */
 import { StateManager } from '../state/stateManager';
 import { DiffFile, DiffHunk } from '../types';
@@ -24,7 +23,7 @@ export interface LineSpan {
 }
 
 export interface RemovedBlock {
-  /** 0-based line below which the removed lines are shown */
+  /** 0-based line the removed lines followed (marked in plain editors) */
   anchorLine: number;
   /** True when the lines were removed before the first line of the file */
   atTop: boolean;

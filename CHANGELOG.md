@@ -2,6 +2,16 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.0] — 2026-10-01
+
+### Changed
+- **Files open as an index ↔ working-tree diff.** Clicking a file in the sidebar opens VS Code's diff editor with the index version on the left and the real file on the right, so removed lines are drawn as red rows and added lines green by the editor itself. The right side is the normal file: editing, search, Ctrl+click and hovers from other extensions all work there, and the Approve / Reject CodeLenses appear above each hunk. The index side reloads after every approve, undo or `git add`, so the diff always shows exactly what is still unstaged
+- The comment widgets that showed removed lines are gone. A plain (non-diff) editor of a reviewed file still gets added lines highlighted, the removal positions marked and the CodeLenses
+- The Approve / Reject CodeLenses use the pass (✓ in a circle) and error (✗ in a circle) icons so the two actions are easier to tell apart; CodeLens text cannot be coloured by extensions
+
+### Added
+- On the first review in a workspace, the extension offers to enable `diffEditor.codeLens` (off by default in VS Code; needed for the lenses in diff editors) and the inline diff view (`diffEditor.renderSideBySide: false`) as workspace settings
+
 ## [3.0.0] — 2026-10-01
 
 ### Changed
