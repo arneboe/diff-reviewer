@@ -2,6 +2,11 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.2] — 2026-10-01
+
+### Changed
+- The Approve / Reject CodeLenses use the colour emoji ✅ and ❌ instead of monochrome codicons, so they stand out from the surrounding lenses. CodeLens colour and size themselves stay under VS Code's control (`editorCodeLens.foreground` in `workbench.colorCustomizations`, `editor.codeLensFontSize`)
+
 ## [3.1.1] — 2026-10-01
 
 ### Fixed
