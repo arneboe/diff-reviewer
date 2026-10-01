@@ -44,14 +44,14 @@ export class ReviewCodeLensProvider implements vscode.CodeLensProvider {
     const lenses: vscode.CodeLens[] = [
       lens(
         top,
-        '$(check-all) Approve file',
+        '$(pass-filled) Approve file',
         'diffReviewer.approveFileRef',
         [ref],
         'Stage the whole file',
       ),
       lens(
         top,
-        '$(clear-all) Reject file',
+        '$(error) Reject file',
         'diffReviewer.rejectFileRef',
         [ref],
         'Discard every unstaged change in this file',
@@ -64,10 +64,10 @@ export class ReviewCodeLensProvider implements vscode.CodeLensProvider {
       const range = new vscode.Range(hunk.lensLine, 0, hunk.lensLine, 0);
       const args = [ref.repoRoot, ref.filePath, hunk.hunkId];
       lenses.push(
-        lens(range, '$(check) Approve', 'diffReviewer.approveHunk', args, 'Stage this change'),
+        lens(range, '$(pass) Approve', 'diffReviewer.approveHunk', args, 'Stage this change'),
         lens(
           range,
-          '$(close) Reject',
+          '$(error) Reject',
           'diffReviewer.rejectHunk',
           args,
           'Discard this change on disk',

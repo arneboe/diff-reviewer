@@ -1,7 +1,7 @@
-import { join, relative, sep } from 'path';
+import { basename, join, relative, sep } from 'path';
 import * as vscode from 'vscode';
 import { DiffFile, FileRef, fileKey } from '../types';
-import { RemovedLinesComments } from './removedLinesComments';
+import { IndexContentProvider, indexUri } from './indexContentProvider';
 import { LensSource, LensView } from './reviewCodeLensProvider';
 import {
   FileRender,
@@ -17,12 +17,13 @@ export interface ReviewModeDeps {
   findFile(repoRoot: string, filePath: string): DiffFile | undefined;
   /** Root of the repository an absolute path belongs to. */
   repoForPath(absPath: string): string | undefined;
+  /** Content of a file as recorded in the index. */
+  readIndexContent(ref: FileRef): Promise<string>;
   /** A reviewed file became the active editor or was saved; its repo should be re-read. */
   onActiveFileChanged(ref: FileRef): void;
 }
 
 interface Rendered {
-  uri: vscode.Uri;
   signature: string;
   model: FileRender;
   /** Added spans as currently drawn; shifted along while the buffer is dirty */
@@ -30,31 +31,39 @@ interface Rendered {
   dirty: boolean;
 }
 
+/** Workspace-state key: the diff-editor settings prompt was answered. */
+const SETTINGS_PROMPTED_KEY = 'diffReviewer.diffEditorSettingsPrompted';
+
 /**
- * Draws the pending hunks of every visible editor while review mode is on:
- * added lines as whole-line decorations, removed lines as comment widgets,
- * actions as CodeLenses (via the provider). Review mode off means nothing is
- * drawn and the editor behaves as usual.
+ * Review mode in the editor.
+ *
+ * A file under review opens as a diff editor, index ↔ working tree, so that
+ * VS Code itself draws removed lines as red rows and added lines green. The
+ * right side is the real file, so editing and every language feature work.
+ * While review mode is on, every visible editor of a file with unstaged
+ * changes gets Approve / Reject CodeLenses; plain (non-diff) editors also get
+ * the added lines highlighted. Review mode off means nothing is drawn.
  *
  * Replaces the old webview panel provider: `refreshRepos`/`refreshFile`
- * re-render exactly the editors an update concerns, and a per-file
- * signature skips identical re-renders.
+ * re-render exactly the editors an update concerns, reload the index side of
+ * open diffs, and a per-file signature skips identical re-renders.
  */
 export class ReviewModeController implements vscode.Disposable, LensSource {
   private enabled = false;
   private readonly added: vscode.TextEditorDecorationType;
   private readonly addedDimmed: vscode.TextEditorDecorationType;
   private readonly removalMarker: vscode.TextEditorDecorationType;
-  private readonly comments = new RemovedLinesComments();
+  private readonly index: IndexContentProvider;
   private readonly statusBar: vscode.StatusBarItem;
   private readonly lensEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeLenses = this.lensEmitter.event;
   /** What is drawn for each file, keyed by fileKey. */
   private rendered = new Map<string, Rendered>();
+  private settingsPromptShown = false;
   private disposables: vscode.Disposable[] = [];
 
   constructor(
-    context: vscode.ExtensionContext,
+    private context: vscode.ExtensionContext,
     private deps: ReviewModeDeps,
   ) {
     this.added = vscode.window.createTextEditorDecorationType({
@@ -81,6 +90,7 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
       overviewRulerLane: vscode.OverviewRulerLane.Left,
     });
+    this.index = new IndexContentProvider((ref) => this.deps.readIndexContent(ref));
 
     this.statusBar = vscode.window.createStatusBarItem(
       'diffReviewer.reviewMode',
@@ -95,7 +105,7 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       this.added,
       this.addedDimmed,
       this.removalMarker,
-      this.comments,
+      this.index,
       this.statusBar,
       this.lensEmitter,
       vscode.window.onDidChangeVisibleTextEditors((editors) => {
@@ -121,7 +131,6 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
         }
       }),
       vscode.workspace.onDidCloseTextDocument((doc) => {
-        this.comments.clearDocument(doc.uri);
         const ref = this.refForDocument(doc);
         if (ref) {
           this.rendered.delete(fileKey(ref.repoRoot, ref.filePath));
@@ -153,7 +162,6 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       for (const editor of vscode.window.visibleTextEditors) {
         this.clearDecorations(editor);
       }
-      this.comments.clearAll();
       this.rendered.clear();
     }
     this.lensEmitter.fire();
@@ -176,7 +184,57 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     this.statusBar.text = this.enabled ? '$(eye) Review' : '$(eye-closed) Review';
     this.statusBar.tooltip = this.enabled
       ? 'Diff Reviewer: review mode is on. Click to turn it off.'
-      : 'Diff Reviewer: review mode is off. Click to highlight unstaged changes in the editor.';
+      : 'Diff Reviewer: review mode is off. Click to show Approve / Reject actions in the editor.';
+  }
+
+  // ---- opening --------------------------------------------------------------
+
+  /**
+   * Open a file as an index ↔ working-tree diff and turn review mode on. The
+   * first time per workspace, offer the diff-editor settings that make the
+   * review comfortable (CodeLens in diff editors, inline view).
+   */
+  async openForReview(ref: FileRef): Promise<void> {
+    this.offerDiffEditorSettings();
+    const fileUri = vscode.Uri.file(join(ref.repoRoot, ref.filePath));
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      indexUri(ref),
+      fileUri,
+      `${basename(ref.filePath)} (Review)`,
+      { preview: false } satisfies vscode.TextDocumentShowOptions,
+    );
+    this.setEnabled(true);
+    this.revealNextHunkFrom(ref, 0);
+  }
+
+  private offerDiffEditorSettings(): void {
+    if (this.settingsPromptShown || this.context.workspaceState.get(SETTINGS_PROMPTED_KEY)) {
+      return;
+    }
+    const config = vscode.workspace.getConfiguration('diffEditor');
+    const codeLens = config.get<boolean>('codeLens', false);
+    const sideBySide = config.get<boolean>('renderSideBySide', true);
+    if (codeLens && !sideBySide) {
+      return;
+    }
+    this.settingsPromptShown = true;
+    void vscode.window
+      .showInformationMessage(
+        'Diff Reviewer shows Approve / Reject as CodeLens and removed lines inline. Enable "diffEditor.codeLens" and the inline diff view for this workspace?',
+        'Enable',
+        'Not now',
+        "Don't ask again",
+      )
+      .then(async (choice) => {
+        if (choice === 'Enable') {
+          await config.update('codeLens', true, vscode.ConfigurationTarget.Workspace);
+          await config.update('renderSideBySide', false, vscode.ConfigurationTarget.Workspace);
+        }
+        if (choice === 'Enable' || choice === "Don't ask again") {
+          await this.context.workspaceState.update(SETTINGS_PROMPTED_KEY, true);
+        }
+      });
   }
 
   // ---- lookups --------------------------------------------------------------
@@ -226,6 +284,17 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     });
   }
 
+  /** True when the document is the right side of a diff editor tab. */
+  private isDiffPane(doc: vscode.TextDocument): boolean {
+    const target = doc.uri.toString();
+    return vscode.window.tabGroups.all.some((group) =>
+      group.tabs.some(
+        (tab) =>
+          tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === target,
+      ),
+    );
+  }
+
   lensViewFor(doc: vscode.TextDocument): LensView | undefined {
     if (!this.enabled) {
       return undefined;
@@ -251,6 +320,7 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
   /** Re-render every visible editor showing a file of one of these repositories. */
   refreshRepos(roots: Iterable<string>): void {
     const rootSet = new Set(roots);
+    this.index.refreshRepos(rootSet);
     for (const editor of vscode.window.visibleTextEditors) {
       const ref = this.refForDocument(editor.document);
       if (ref && rootSet.has(ref.repoRoot)) {
@@ -262,6 +332,7 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
 
   /** Re-render the editors of one file, or clear them when it has nothing left to review. */
   refreshFile(ref: FileRef): void {
+    this.index.refreshFile(ref);
     const editors = this.editorsFor(ref);
     for (const editor of editors) {
       this.renderEditor(editor);
@@ -271,15 +342,14 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     }
   }
 
-  /** Drop widgets of files that left the tree while no editor showed them. */
+  /** Forget files that left the tree while no editor showed them. */
   private pruneHidden(matches: (key: string) => boolean): void {
-    for (const [key, entry] of this.rendered) {
+    for (const key of this.rendered.keys()) {
       if (!matches(key)) {
         continue;
       }
       const [repoRoot, filePath] = key.split('\0');
       if (!this.deps.findFile(repoRoot, filePath)) {
-        this.comments.clearDocument(entry.uri);
         this.rendered.delete(key);
         this.lensEmitter.fire();
       }
@@ -296,13 +366,9 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       this.clearDecorations(editor);
       if (ref) {
         const key = fileKey(ref.repoRoot, ref.filePath);
-        if (this.rendered.has(key)) {
-          this.rendered.delete(key);
-          this.comments.clearDocument(doc.uri);
+        if (this.rendered.delete(key)) {
           this.lensEmitter.fire();
         }
-      } else if (this.enabled) {
-        this.comments.clearDocument(doc.uri);
       }
       return;
     }
@@ -320,17 +386,19 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
       // A buffer that is already dirty keeps the spans tracked so far; a
       // fresh render has only the on-disk positions to offer.
       const spans = dirty && previous ? previous.spans : model.addedSpans;
-      entry = { uri: doc.uri, signature, model, spans, dirty };
+      entry = { signature, model, spans, dirty };
       this.rendered.set(key, entry);
-      if (!dirty || !previous) {
-        this.comments.sync(doc, model);
-      }
       this.lensEmitter.fire();
     }
     this.applyDecorations(editor, entry);
   }
 
   private applyDecorations(editor: vscode.TextEditor, entry: Rendered): void {
+    if (this.isDiffPane(editor.document)) {
+      // The diff editor already paints added and removed lines.
+      this.clearDecorations(editor);
+      return;
+    }
     const ranges = entry.spans.map((s) => new vscode.Range(s.start, 0, s.end, 0));
     if (entry.dirty) {
       editor.setDecorations(this.added, []);

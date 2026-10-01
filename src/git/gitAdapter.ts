@@ -260,6 +260,16 @@ export class GitAdapter {
     await this.exec(['apply', '--unidiff-zero', '-'], patch);
   }
 
+  /**
+   * Content of a file as recorded in the index (what `git diff` compares the
+   * working tree against). Empty for files the index does not know, such as
+   * untracked ones, and for intent-to-add entries.
+   */
+  async getIndexContent(filePath: string): Promise<string> {
+    const res = await this.run(['show', `:${filePath}`]);
+    return res.code === 0 ? res.stdout : '';
+  }
+
   /** Raw bytes and permission bits of a working-tree file; null content when missing. */
   async snapshotWorktreeFile(filePath: string): Promise<{ content: Buffer | null; mode: number }> {
     const absPath = join(this.repoRoot, filePath);
