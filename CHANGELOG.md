@@ -2,6 +2,11 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.4] — 2026-11-02
+
+### Fixed
+- `package-lock.json` carries the package version again (it was stuck at 3.0.0)
+
 ## [3.1.3] — 2026-11-02
 
 ### Fixed
