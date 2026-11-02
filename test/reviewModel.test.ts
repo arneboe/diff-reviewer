@@ -9,7 +9,6 @@ import {
   hunkAtOrAfter,
   neighbourHunkLine,
   renderSignature,
-  shiftSpan,
 } from '../src/review/reviewModel';
 import { DiffFile, DiffHunk, DiffLine } from '../src/types';
 
@@ -58,7 +57,7 @@ function modified(hunks: DiffHunk[], extra: Partial<DiffFile> = {}): DiffFile {
 }
 
 describe('buildRenderModel', () => {
-  it('maps a replace hunk: added span, lens on first added line, widget above', () => {
+  it('maps a replace hunk: added span, lens on first added line', () => {
     // hello / -world / +beautiful world / +today / end  → 4 lines on disk
     const model = buildRenderModel(fixture('simple.diff'), 4);
     assert.equal(model.wholeFile, false);
@@ -66,10 +65,8 @@ describe('buildRenderModel', () => {
     const h = model.hunks[0];
     assert.deepEqual(h.added, { start: 1, end: 2 });
     assert.equal(h.lensLine, 1);
-    assert.deepEqual(h.removed, { anchorLine: 0, atTop: false, lines: ['world'] });
     assert.equal(h.addedCount, 2);
     assert.equal(h.removedCount, 1);
-    assert.deepEqual(model.addedSpans, [{ start: 1, end: 2 }]);
     assert.equal(model.summary, '1 hunk left');
   });
 
@@ -77,59 +74,51 @@ describe('buildRenderModel', () => {
     const model = buildRenderModel(fixture('nonl.diff'), 3);
     const h = model.hunks[0];
     assert.deepEqual(h.added, { start: 1, end: 2 });
-    assert.deepEqual(h.removed, { anchorLine: 0, atTop: false, lines: ['two'] });
+    assert.equal(h.removedCount, 1);
   });
 
   it('keeps hunks sorted and handles pure additions', () => {
     const model = buildRenderModel(fixture('multi-hunk.diff'), 16);
     assert.equal(model.hunks.length, 2);
     assert.deepEqual(model.hunks[0].added, { start: 1, end: 1 });
-    assert.deepEqual(model.hunks[0].removed?.lines, ['const app = express();']);
+    assert.equal(model.hunks[0].removedCount, 1);
     const second = model.hunks[1];
     assert.deepEqual(second.added, { start: 12, end: 13 });
     assert.equal(second.lensLine, 12);
-    assert.equal(second.removed, null);
     assert.equal(second.removedCount, 0);
     assert.equal(model.summary, '2 hunks left');
   });
 
-  it('pure deletion in the middle: no span, lens on the following line, widget above it', () => {
+  it('pure deletion in the middle: no span, lens on the following line', () => {
     const model = buildRenderModel(modified([hunk(5, ['gone', 'also gone'], [])]), 10);
     const h = model.hunks[0];
     assert.equal(h.added, null);
     assert.equal(h.lensLine, 4);
-    assert.deepEqual(h.removed, { anchorLine: 3, atTop: false, lines: ['gone', 'also gone'] });
-    assert.deepEqual(model.addedSpans, []);
+    assert.equal(h.removedCount, 2);
   });
 
   it('pure deletion at the end of the file sits on the last line', () => {
     const model = buildRenderModel(modified([hunk(11, ['tail'], [])]), 10);
     const h = model.hunks[0];
     assert.equal(h.lensLine, 9);
-    assert.equal(h.removed?.anchorLine, 9);
-    assert.equal(h.removed?.atTop, false);
   });
 
-  it('deletion before the first line is flagged atTop', () => {
+  it('deletion before the first line sits on line 0', () => {
     const model = buildRenderModel(modified([hunk(1, ['head'], [])]), 10);
-    const h = model.hunks[0];
-    assert.equal(h.lensLine, 0);
-    assert.deepEqual(h.removed, { anchorLine: 0, atTop: true, lines: ['head'] });
+    assert.equal(model.hunks[0].lensLine, 0);
   });
 
-  it('a file added in the index is whole-file with every line painted', () => {
+  it('a file added in the index is whole-file', () => {
     const model = buildRenderModel(fixture('newfile.diff'), 2);
     assert.equal(model.wholeFile, true);
     assert.deepEqual(model.hunks, []);
-    assert.deepEqual(model.addedSpans, [{ start: 0, end: 1 }]);
     assert.equal(model.summary, 'New file');
   });
 
-  it('an untracked file is whole-file with every line painted', () => {
+  it('an untracked file is whole-file', () => {
     const file = modified([hunk(1, [], ['a', 'b', 'c'])], { kind: 'added', isUntracked: true });
     const model = buildRenderModel(file, 3);
     assert.equal(model.wholeFile, true);
-    assert.deepEqual(model.addedSpans, [{ start: 0, end: 2 }]);
     assert.equal(model.summary, 'New file');
   });
 
@@ -139,7 +128,6 @@ describe('buildRenderModel', () => {
 
     const modeOnly = buildRenderModel(fixture('mode-only.diff'), 5);
     assert.equal(modeOnly.wholeFile, true);
-    assert.deepEqual(modeOnly.addedSpans, []);
     assert.equal(modeOnly.summary, 'Mode 100644 → 100755');
 
     const binary = modified([], { isBinary: true });
@@ -161,15 +149,12 @@ describe('buildRenderModel', () => {
     const beyond = buildRenderModel(modified([hunk(20, ['old'], ['a', 'b'])]), 10);
     assert.equal(beyond.hunks[0].added, null);
     assert.equal(beyond.hunks[0].lensLine, 9);
-    assert.equal(beyond.hunks[0].removed?.anchorLine, 9);
-    assert.deepEqual(beyond.addedSpans, []);
   });
 
   it('collapses everything onto line 0 for a one-line document', () => {
     const model = buildRenderModel(modified([hunk(1, ['x'], ['a', 'b', 'c'])]), 1);
     assert.deepEqual(model.hunks[0].added, { start: 0, end: 0 });
     assert.equal(model.hunks[0].lensLine, 0);
-    assert.equal(model.hunks[0].removed?.anchorLine, 0);
   });
 });
 
@@ -215,57 +200,6 @@ describe('neighbourHunkLine', () => {
   it('is undefined without hunks', () => {
     const empty = buildRenderModel(modified([]), 3);
     assert.equal(neighbourHunkLine(empty, 0, 'next'), undefined);
-  });
-});
-
-describe('shiftSpan', () => {
-  const span = { start: 5, end: 8 };
-
-  it('leaves a span above the edit alone', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 9, endLine: 9, newLineCount: 3 }), span);
-  });
-
-  it('shifts a span below an insertion down', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 2, endLine: 2, newLineCount: 2 }), {
-      start: 7,
-      end: 10,
-    });
-  });
-
-  it('shifts a span below a deletion up', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 1, endLine: 3, newLineCount: 0 }), {
-      start: 3,
-      end: 6,
-    });
-  });
-
-  it('shrinks a span when lines inside it are deleted', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 6, endLine: 7, newLineCount: 0 }), {
-      start: 5,
-      end: 7,
-    });
-  });
-
-  it('grows a span when lines are pasted inside it', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 6, endLine: 6, newLineCount: 3 }), {
-      start: 5,
-      end: 11,
-    });
-  });
-
-  it('cuts a span whose start was deleted', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 3, endLine: 6, newLineCount: 0 }), {
-      start: 3,
-      end: 5,
-    });
-  });
-
-  it('returns null when the whole span was deleted', () => {
-    assert.equal(shiftSpan(span, { startLine: 4, endLine: 9, newLineCount: 0 }), null);
-  });
-
-  it('keeps a span whose last line is edited without a line break', () => {
-    assert.deepEqual(shiftSpan(span, { startLine: 8, endLine: 8, newLineCount: 0 }), span);
   });
 });
 

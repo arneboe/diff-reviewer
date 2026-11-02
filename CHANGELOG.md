@@ -2,6 +2,14 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.3] — 2026-11-02
+
+### Fixed
+- The Approve / Reject CodeLenses appear only in the diff editor. A plain (non-diff) editor of a file under review no longer shows them. A file open in a diff tab and a plain tab at the same time still shows them in both, since VS Code hands CodeLens providers the shared document, not the editor
+
+### Changed
+- Plain editors are left completely untouched in review mode: no added-line highlights, removal markers or dimmed markers while editing. The keyboard commands (approve / reject the hunk at the cursor, next / previous hunk) still work there
+
 ## [3.1.2] — 2026-10-01
 
 ### Changed

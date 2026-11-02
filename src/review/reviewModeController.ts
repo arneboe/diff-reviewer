@@ -3,14 +3,7 @@ import * as vscode from 'vscode';
 import { DiffFile, FileRef, fileKey } from '../types';
 import { IndexContentProvider, indexUri } from './indexContentProvider';
 import { LensSource, LensView } from './reviewCodeLensProvider';
-import {
-  FileRender,
-  LineSpan,
-  buildRenderModel,
-  hunkAtOrAfter,
-  renderSignature,
-  shiftSpan,
-} from './reviewModel';
+import { FileRender, buildRenderModel, hunkAtOrAfter, renderSignature } from './reviewModel';
 
 export interface ReviewModeDeps {
   /** The pending diff of a file, from the sidebar tree. */
@@ -26,8 +19,6 @@ export interface ReviewModeDeps {
 interface Rendered {
   signature: string;
   model: FileRender;
-  /** Added spans as currently drawn; shifted along while the buffer is dirty */
-  spans: LineSpan[];
   dirty: boolean;
 }
 
@@ -40,24 +31,21 @@ const SETTINGS_PROMPTED_KEY = 'diffReviewer.diffEditorSettingsPrompted';
  * A file under review opens as a diff editor, index ↔ working tree, so that
  * VS Code itself draws removed lines as red rows and added lines green. The
  * right side is the real file, so editing and every language feature work.
- * While review mode is on, every visible editor of a file with unstaged
- * changes gets Approve / Reject CodeLenses; plain (non-diff) editors also get
- * the added lines highlighted. Review mode off means nothing is drawn.
+ * While review mode is on, the diff editor of a file with unstaged changes
+ * gets Approve / Reject CodeLenses; plain (non-diff) editors are left
+ * untouched. Review mode off means no lenses at all.
  *
  * Replaces the old webview panel provider: `refreshRepos`/`refreshFile`
- * re-render exactly the editors an update concerns, reload the index side of
- * open diffs, and a per-file signature skips identical re-renders.
+ * rebuild the lens models of exactly the files an update concerns, reload the
+ * index side of open diffs, and a per-file signature skips identical rebuilds.
  */
 export class ReviewModeController implements vscode.Disposable, LensSource {
   private enabled = false;
-  private readonly added: vscode.TextEditorDecorationType;
-  private readonly addedDimmed: vscode.TextEditorDecorationType;
-  private readonly removalMarker: vscode.TextEditorDecorationType;
   private readonly index: IndexContentProvider;
   private readonly statusBar: vscode.StatusBarItem;
   private readonly lensEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeLenses = this.lensEmitter.event;
-  /** What is drawn for each file, keyed by fileKey. */
+  /** Lens model of each file, keyed by fileKey. */
   private rendered = new Map<string, Rendered>();
   private settingsPromptShown = false;
   private disposables: vscode.Disposable[] = [];
@@ -66,30 +54,6 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     private context: vscode.ExtensionContext,
     private deps: ReviewModeDeps,
   ) {
-    this.added = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
-      overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
-      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-    });
-    this.addedDimmed = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      borderWidth: '0 0 0 2px',
-      borderStyle: 'dashed',
-      borderColor: new vscode.ThemeColor('editorGutter.addedBackground'),
-      overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
-      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-    });
-    this.removalMarker = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      borderWidth: '0 0 1px 0',
-      borderStyle: 'solid',
-      borderColor: new vscode.ThemeColor('editorGutter.deletedBackground'),
-      overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
-    });
     this.index = new IndexContentProvider((ref) => this.deps.readIndexContent(ref));
 
     this.statusBar = vscode.window.createStatusBarItem(
@@ -102,9 +66,6 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     this.updateStatusBar();
 
     this.disposables.push(
-      this.added,
-      this.addedDimmed,
-      this.removalMarker,
       this.index,
       this.statusBar,
       this.lensEmitter,
@@ -121,6 +82,14 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
         const ref = this.enabled ? this.refForDocument(editor.document) : undefined;
         if (ref) {
           this.deps.onActiveFileChanged(ref);
+        }
+      }),
+      // Opening or closing a diff tab decides whether the file shows lenses.
+      vscode.window.tabGroups.onDidChangeTabs((e) => {
+        if (
+          [...e.opened, ...e.closed].some((tab) => tab.input instanceof vscode.TabInputTextDiff)
+        ) {
+          this.lensEmitter.fire();
         }
       }),
       vscode.workspace.onDidChangeTextDocument((e) => this.onDocumentChanged(e)),
@@ -159,9 +128,6 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
         this.renderEditor(editor);
       }
     } else {
-      for (const editor of vscode.window.visibleTextEditors) {
-        this.clearDecorations(editor);
-      }
       this.rendered.clear();
     }
     this.lensEmitter.fire();
@@ -304,7 +270,12 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     );
   }
 
+  /** Lenses belong to the diff editor only; plain editors of the file get none. */
   lensViewFor(doc: vscode.TextDocument): LensView | undefined {
+    return this.isDiffPane(doc) ? this.viewFor(doc) : undefined;
+  }
+
+  private viewFor(doc: vscode.TextDocument): LensView | undefined {
     if (!this.enabled) {
       return undefined;
     }
@@ -321,7 +292,7 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
 
   /** Current render model of a document, undefined when not drawn. */
   modelFor(doc: vscode.TextDocument): FileRender | undefined {
-    return this.lensViewFor(doc)?.model;
+    return this.viewFor(doc)?.model;
   }
 
   // ---- refresh --------------------------------------------------------------
@@ -367,66 +338,29 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
 
   // ---- rendering ------------------------------------------------------------
 
+  /** Rebuild a file's lens model when its diff, length or dirty flag changed. */
   private renderEditor(editor: vscode.TextEditor): void {
     const doc = editor.document;
     const ref = this.enabled ? this.refForDocument(doc) : undefined;
-    const file = ref && this.deps.findFile(ref.repoRoot, ref.filePath);
-    if (!ref || !file) {
-      this.clearDecorations(editor);
-      if (ref) {
-        const key = fileKey(ref.repoRoot, ref.filePath);
-        if (this.rendered.delete(key)) {
-          this.lensEmitter.fire();
-        }
+    if (!ref) {
+      return;
+    }
+    const key = fileKey(ref.repoRoot, ref.filePath);
+    const file = this.deps.findFile(ref.repoRoot, ref.filePath);
+    if (!file) {
+      if (this.rendered.delete(key)) {
+        this.lensEmitter.fire();
       }
       return;
     }
 
-    const key = fileKey(ref.repoRoot, ref.filePath);
     const dirty = doc.isDirty;
     const signature = renderSignature(file, doc.lineCount, dirty);
-    const previous = this.rendered.get(key);
-
-    let entry: Rendered;
-    if (previous && previous.signature === signature) {
-      entry = previous;
-    } else {
-      const model = buildRenderModel(file, doc.lineCount);
-      // A buffer that is already dirty keeps the spans tracked so far; a
-      // fresh render has only the on-disk positions to offer.
-      const spans = dirty && previous ? previous.spans : model.addedSpans;
-      entry = { signature, model, spans, dirty };
-      this.rendered.set(key, entry);
-      this.lensEmitter.fire();
-    }
-    this.applyDecorations(editor, entry);
-  }
-
-  private applyDecorations(editor: vscode.TextEditor, entry: Rendered): void {
-    if (this.isDiffPane(editor.document)) {
-      // The diff editor already paints added and removed lines.
-      this.clearDecorations(editor);
+    if (this.rendered.get(key)?.signature === signature) {
       return;
     }
-    const ranges = entry.spans.map((s) => new vscode.Range(s.start, 0, s.end, 0));
-    if (entry.dirty) {
-      editor.setDecorations(this.added, []);
-      editor.setDecorations(this.addedDimmed, ranges);
-      editor.setDecorations(this.removalMarker, []);
-      return;
-    }
-    const anchors = entry.model.hunks
-      .filter((h) => h.removed)
-      .map((h) => new vscode.Range(h.removed!.anchorLine, 0, h.removed!.anchorLine, 0));
-    editor.setDecorations(this.added, ranges);
-    editor.setDecorations(this.addedDimmed, []);
-    editor.setDecorations(this.removalMarker, anchors);
-  }
-
-  private clearDecorations(editor: vscode.TextEditor): void {
-    editor.setDecorations(this.added, []);
-    editor.setDecorations(this.addedDimmed, []);
-    editor.setDecorations(this.removalMarker, []);
+    this.rendered.set(key, { signature, model: buildRenderModel(file, doc.lineCount), dirty });
+    this.lensEmitter.fire();
   }
 
   private onDocumentChanged(e: vscode.TextDocumentChangeEvent): void {
@@ -435,57 +369,12 @@ export class ReviewModeController implements vscode.Disposable, LensSource {
     if (!ref) {
       return;
     }
-    const editors = this.editorsFor(ref);
-    if (editors.length === 0) {
+    // While dirty the lenses only ask to save, so further typing changes nothing.
+    if (doc.isDirty && this.rendered.get(fileKey(ref.repoRoot, ref.filePath))?.dirty) {
       return;
     }
-    if (!doc.isDirty) {
-      // Reloaded from disk (e.g. after a reject) or edited back to the saved
-      // state: draw the on-disk positions again.
-      for (const editor of editors) {
-        this.renderEditor(editor);
-      }
-      return;
-    }
-
-    const key = fileKey(ref.repoRoot, ref.filePath);
-    const entry = this.rendered.get(key);
-    if (!entry) {
-      for (const editor of editors) {
-        this.renderEditor(editor);
-      }
-      return;
-    }
-
-    // All change ranges refer to the document before the edit; applying them
-    // bottom-up keeps the earlier ones' coordinates valid.
-    const changes = [...e.contentChanges].sort((a, b) => b.range.start.line - a.range.start.line);
-    let spans = entry.spans;
-    for (const change of changes) {
-      const lineChange = {
-        startLine: change.range.start.line,
-        endLine: change.range.end.line,
-        newLineCount: change.text.split('\n').length - 1,
-      };
-      spans = spans.flatMap((s) => {
-        const moved = shiftSpan(s, lineChange);
-        return moved ? [moved] : [];
-      });
-    }
-    const becameDirty = !entry.dirty;
-    const file = this.deps.findFile(ref.repoRoot, ref.filePath);
-    const updated: Rendered = {
-      ...entry,
-      spans,
-      dirty: true,
-      signature: file ? renderSignature(file, doc.lineCount, true) : entry.signature,
-    };
-    this.rendered.set(key, updated);
-    for (const editor of editors) {
-      this.applyDecorations(editor, updated);
-    }
-    if (becameDirty) {
-      this.lensEmitter.fire();
+    for (const editor of this.editorsFor(ref)) {
+      this.renderEditor(editor);
     }
   }
 

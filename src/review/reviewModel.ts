@@ -10,8 +10,7 @@
  * block, which is `lineCount + 1` for a deletion at the end of the file.
  *
  * All positions returned here are 0-based editor lines. CodeLenses are drawn
- * above their line, so a hunk's lens sits at `newStart - 1`; a removal before
- * line `newStart` is anchored to the line it followed, `newStart - 2`.
+ * above their line, so a hunk's lens sits at `newStart - 1`.
  */
 import { StateManager } from '../state/stateManager';
 import { DiffFile, DiffHunk } from '../types';
@@ -22,22 +21,12 @@ export interface LineSpan {
   end: number;
 }
 
-export interface RemovedBlock {
-  /** 0-based line the removed lines followed (marked in plain editors) */
-  anchorLine: number;
-  /** True when the lines were removed before the first line of the file */
-  atTop: boolean;
-  lines: string[];
-}
-
 export interface HunkRender {
   hunkId: string;
   /** 0-based line the CodeLens is attached to (drawn above it) */
   lensLine: number;
   /** Added lines, or null for a pure deletion */
   added: LineSpan | null;
-  /** Removed lines, or null for a pure addition */
-  removed: RemovedBlock | null;
   addedCount: number;
   removedCount: number;
   header: string;
@@ -48,20 +37,8 @@ export interface FileRender {
   wholeFile: boolean;
   /** Per-hunk render data, sorted by position; empty for whole-file cases */
   hunks: HunkRender[];
-  /** Every span to paint as added (for an untracked file: all its lines) */
-  addedSpans: LineSpan[];
   /** Short text for the file-level CodeLens */
   summary: string;
-}
-
-/** A document edit, as reported by `TextDocumentContentChangeEvent`. */
-export interface LineChange {
-  /** 0-based first line of the replaced range */
-  startLine: number;
-  /** 0-based last line of the replaced range */
-  endLine: number;
-  /** Number of line breaks in the inserted text */
-  newLineCount: number;
 }
 
 function clampTo(last: number): (line: number) => number {
@@ -83,19 +60,15 @@ function addedSpan(hunk: DiffHunk, last: number): LineSpan | null {
 function renderHunk(hunk: DiffHunk, lineCount: number): HunkRender {
   const last = Math.max(lineCount - 1, 0);
   const clamp = clampTo(last);
-  const removedLines = hunk.lines.filter((l) => l.type === 'remove').map((l) => l.content);
+  const removedCount = hunk.lines.filter((l) => l.type === 'remove').length;
   const addedCount = hunk.lines.filter((l) => l.type === 'add').length;
 
   return {
     hunkId: hunk.id ?? '',
     lensLine: clamp(hunk.newStart - 1),
     added: addedSpan(hunk, last),
-    removed:
-      removedLines.length > 0
-        ? { anchorLine: clamp(hunk.newStart - 2), atTop: hunk.newStart <= 1, lines: removedLines }
-        : null,
     addedCount,
-    removedCount: removedLines.length,
+    removedCount,
     header: hunk.header,
   };
 }
@@ -123,19 +96,12 @@ function wholeFileSummary(file: DiffFile): string {
 
 /** Map a file's pending hunks onto a document with `lineCount` lines. */
 export function buildRenderModel(file: DiffFile, lineCount: number): FileRender {
-  const wholeFile = StateManager.isWholeFile(file);
-  const sorted = [...file.hunks].sort((a, b) => a.newStart - b.newStart);
-  const rendered = sorted.map((h) => renderHunk(h, lineCount));
-
-  if (wholeFile) {
-    return {
-      wholeFile: true,
-      hunks: [],
-      addedSpans: file.isBinary ? [] : rendered.flatMap((h) => (h.added ? [h.added] : [])),
-      summary: wholeFileSummary(file),
-    };
+  if (StateManager.isWholeFile(file)) {
+    return { wholeFile: true, hunks: [], summary: wholeFileSummary(file) };
   }
 
+  const sorted = [...file.hunks].sort((a, b) => a.newStart - b.newStart);
+  const rendered = sorted.map((h) => renderHunk(h, lineCount));
   const count = rendered.length;
   const parts = [`${count} ${count === 1 ? 'hunk' : 'hunks'} left`];
   const mode = modeText(file);
@@ -145,7 +111,6 @@ export function buildRenderModel(file: DiffFile, lineCount: number): FileRender 
   return {
     wholeFile: false,
     hunks: rendered,
-    addedSpans: rendered.flatMap((h) => (h.added ? [h.added] : [])),
     summary: parts.join(', '),
   };
 }
@@ -183,23 +148,4 @@ export function neighbourHunkLine(
   }
   const before = lines.filter((l) => l < line);
   return before.length > 0 ? before[before.length - 1] : lines[lines.length - 1];
-}
-
-/**
- * Move a span to follow a document edit. Spans above the edit are unchanged,
- * spans below shift by the number of lines the edit added or removed, and a
- * span the edit overlaps shrinks or grows with it. Returns null when nothing
- * of the span is left.
- */
-export function shiftSpan(span: LineSpan, change: LineChange): LineSpan | null {
-  const delta = change.newLineCount - (change.endLine - change.startLine);
-  if (change.startLine > span.end) {
-    return span;
-  }
-  if (change.endLine < span.start) {
-    return { start: span.start + delta, end: span.end + delta };
-  }
-  const start = Math.min(span.start, change.startLine);
-  const end = span.end + delta;
-  return end < start ? null : { start, end };
 }

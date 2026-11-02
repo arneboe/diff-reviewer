@@ -81,7 +81,7 @@ export async function activate(context: vscode.ExtensionContext) {
     treeView.badge = count > 0 ? { value: count, tooltip: `${count} files to review` } : undefined;
   });
 
-  // Review mode: diff editors, decorations and CodeLenses
+  // Review mode: diff editors and CodeLenses
   reviewMode = new ReviewModeController(context, {
     findFile: (repoRoot, filePath) => fileTreeProvider.findFile(repoRoot, filePath),
     repoForPath: (absPath) => repos.repoForPath(absPath),

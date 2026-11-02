@@ -1,6 +1,6 @@
 # Diff Reviewer
 
-**Diff Reviewer** is a VS Code extension that brings an interactive, hunk-by-hunk review workflow directly into your editor. It is built for reviewing what a coding agent wrote: browse the unstaged changes in a sidebar, open any file in the normal editor with its changes highlighted, and approve (stage) or reject (discard) individual change groups. When you are done, the index holds exactly what you approved, ready to commit.
+**Diff Reviewer** is a VS Code extension that brings an interactive, hunk-by-hunk review workflow directly into your editor. It is built for reviewing what a coding agent wrote: browse the unstaged changes in a sidebar, open any file as a diff against the index, and approve (stage) or reject (discard) individual change groups. When you are done, the index holds exactly what you approved, ready to commit.
 
 ![Diff Reviewer in action](images/preview.png)
 
@@ -13,7 +13,7 @@
 - **Approve or reject an entire file** - One-click buttons in the sidebar context menu to bulk-approve or bulk-reject all hunks in a file
 - **Undo** - Every approve and reject action can be undone with **Undo Last Action** during the session
 - **Approvals live in git** - Approval state is the git index, so it survives reloads and is visible to every other git tool
-- **Theme-aware** - Highlights use the diff colours of your VS Code theme
+- **Theme-aware** - The diff editor uses the diff colours of your VS Code theme
 
 ## Requirements
 
@@ -46,9 +46,9 @@ Untracked files, empty new files and file-mode changes are reviewed as a whole w
 
 ### Review mode
 
-Review mode is global: while it is on, every visible editor whose file has unstaged changes gets the Approve / Reject CodeLenses, and a plain (non-diff) editor also gets its added lines highlighted; while it is off, nothing is drawn and the editor behaves exactly as usual. The diff tabs stay open either way. Toggle it with the **Review** item in the status bar, the eye button in the sidebar title, or the commands **Toggle / Enable / Disable Review Mode**. It is off after every window reload until you turn it on or click a file in the sidebar.
+Review mode is global: while it is on, every diff editor whose file has unstaged changes gets the Approve / Reject CodeLenses. Plain (non-diff) editors are never touched. While it is off, no lenses are drawn. The diff tabs stay open either way. Toggle it with the **Review** item in the status bar, the eye button in the sidebar title, or the commands **Toggle / Enable / Disable Review Mode**. It is off after every window reload until you turn it on or click a file in the sidebar.
 
-Editing a file while reviewing is fine. As soon as the editor has unsaved changes, the highlights turn into dimmed markers that follow your edits and the CodeLens asks you to save; after saving, the diff is re-read and the highlights return.
+Editing a file while reviewing is fine. As soon as the editor has unsaved changes, the CodeLens asks you to save; after saving, the diff is re-read and the Approve / Reject actions return.
 
 ### Keyboard-driven review
 
