@@ -2,6 +2,14 @@
 
 All notable changes to **Diff Reviewer** are documented in this file.
 
+## [3.1.5] — 2026-11-04
+
+### Added
+- Docker build: `docker build --output type=local,dest=dist .` runs lint and the tests and writes the packaged `.vsix` to `dist/` (see "Building from Source" in the README)
+
+### Fixed
+- `.gitignore` ignores `.DS_Store` and `dist/` again; a missing newline had merged them into one bogus pattern, so the Docker output showed up as untracked files
+
 ## [3.1.4] — 2026-11-02
 
 ### Fixed
