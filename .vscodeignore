@@ -13,3 +13,7 @@ eslint.config.mjs
 CLAUDE.md
 **/*.ts
 **/*.map
+Dockerfile
+.dockerignore
+.github/**
+dist/**

@@ -51,6 +51,44 @@ If the opened folder is not a Git repository itself, Diff Reviewer searches its 
 
 After approving a hunk, hover the mouse on top of the "APPROVED" label, it will turn into an "UNDO" button. WARNING: Rejected hunks can't be undone.
 
+## Building from Source
+
+### With Docker (recommended)
+
+You only need Docker with BuildKit, which recent Docker versions enable by default. Run from the repository root:
+
+```bash
+docker build --output type=local,dest=dist .
+```
+
+This runs lint and the tests, then packages the extension. The resulting `diff-reviewer-<version>.vsix` is written to `dist/`. Change `dest=` to write it to another folder. If lint or a test fails, the build stops and no `.vsix` is written.
+
+Optional build arguments:
+
+- `--build-arg NODE_VERSION=22` - Node.js major version of the build image (default: 22)
+- `--build-arg VSCE_VERSION=3` - version of `@vscode/vsce` used for packaging (default: 3)
+
+### Locally
+
+You need Node.js 22 (see `.nvmrc`) and Git.
+
+```bash
+npm ci
+npm run lint
+npm test
+npx @vscode/vsce package
+```
+
+`vsce package` runs the esbuild build (`npm run build`) and writes the `.vsix` to the repository root. During development, use `npm run watch` to rebuild on every change.
+
+### Installing the `.vsix`
+
+```bash
+code --install-extension dist/diff-reviewer-<version>.vsix
+```
+
+Or in VS Code: **Extensions** view → **⋯** menu → **Install from VSIX...**
+
 ## Release Notes
 
 See the full [CHANGELOG](CHANGELOG.md) for version history.
